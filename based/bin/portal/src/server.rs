@@ -8,12 +8,10 @@ use alloy_rpc_types::{
 };
 use bop_common::{
     api::{
-        EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient,
-        OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PortalApiServer, RegistryApiClient,
-    },
-    communication::messages::{RpcError, RpcResult},
-    utils::{uuid, wait_for_signal},
+        EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, GatewayApiClient, OpGethAdminApiClient, OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PortalApiServer, RegistryApiClient, PORTAL_CAPABILITIES
+    }, communication::messages::{RpcError, RpcResult}, time::Nanos, utils::{uuid, wait_for_signal}
 };
+use futures::future::join_all;
 use jsonrpsee::{
     core::{ClientError, async_trait},
     http_client::{HttpClientBuilder, transport::HttpBackend},
@@ -38,6 +36,35 @@ pub type AuthRpcClient = jsonrpsee::http_client::HttpClient<AuthClientService<Ht
 struct Gateway {
     id: Url,
     client: AuthRpcClient,
+    ping: Option<Nanos>,
+    clock_offset: Option<Nanos>
+}
+
+impl Gateway {
+    pub async fn refresh(mut self) -> Self{
+        let local_clock = Nanos::now();
+        if let Ok(remote_clock) = self.client.heartbeat().await {
+            let el = local_clock.elapsed();
+            self.ping = Some(el);
+            let local_clock_plus_ping = local_clock + el;
+
+        
+            self.clock_offset = if local_clock_plus_ping < remote_clock {
+                Some(remote_clock - local_clock_plus_ping)
+                
+            } else {
+                Some( local_clock_plus_ping - remote_clock )
+                
+            };
+           
+        } else {
+            self.ping = None;
+            self.clock_offset = None;
+        }
+        self
+        
+    }
+    
 }
 
 impl fmt::Debug for Gateway {
@@ -187,14 +214,43 @@ impl PortalServer {
             };
             gateways.push(client);
         }
+
+        let mut handles = vec![];
+
+        for gateway in gateways {
+            handles.push(tokio::spawn(gateway.refresh()));
+        }
+        let gateways: Vec<_> = join_all(handles).await.into_iter().filter_map(|t| t.ok()).collect();
+        
+        let n_gateways = gateways.len();
         *self.gateways.write() = gateways;
 
         let (_, gateway_url, _, _) = self.registry_client.current_gateway().await?;
-        for g in self.gateways() {
+        let mut supposed_next = None;
+        for (i, g) in self.gateways().into_iter().enumerate() {
             if g.id == gateway_url {
-                *self.current_gateway.lock().await = Some(g);
+                if g.ping.is_some() {
+                    *self.current_gateway.lock().await = Some(g);
+                    return Ok(());
+                }
+                supposed_next = Some(i);
+                break;
+            }
+        }
+        let Some(supposed_next) = supposed_next else {
+            error!(
+                "CRITICAL: Couldn't find the current gateway in the list we got from the registry. This means the registry is inconsistent"
+            );
+            return Ok(());
+        };
+        let mut i = 1;
+        while i < n_gateways {
+            let id = (supposed_next + i)%n_gateways;
+            if self.gateways.read()[id].ping.is_some() {
+                *self.current_gateway.lock().await = Some(self.gateways.read()[id].clone());
                 return Ok(());
             }
+            i += 1;
         }
 
         error!(
@@ -683,6 +739,6 @@ fn create_auth_client(url: Url, jwt: JwtSecret, timeout: Duration) -> eyre::Resu
 
 fn create_gateway_client(url: Url, jwt: JwtSecret, timeout: Duration) -> eyre::Result<Gateway> {
     let client = create_auth_client(url.clone(), jwt, timeout)?;
-    let gateway_client = Gateway { client, id: url };
+    let gateway_client = Gateway { client, id: url, ping: None, clock_offset: None};
     Ok(gateway_client)
 }

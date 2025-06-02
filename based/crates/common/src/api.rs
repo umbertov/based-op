@@ -14,7 +14,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::communication::messages::RpcResult;
+use crate::{communication::messages::RpcResult, time::Nanos};
 
 pub const PORTAL_CAPABILITIES: &[&str] = &[
     "engine_forkchoiceUpdatedV3",
@@ -130,6 +130,15 @@ pub trait MinimalEthApi {
     /// Sends signed transaction, returning its hash
     #[method(name = "sendRawTransaction")]
     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256>;
+}
+
+#[rpc(client, server, namespace = "gateway")]
+pub trait GatewayApi {
+    /// Sends signed transaction, returning its hash
+    #[method(name = "heartbeat")]
+    async fn heartbeat(&self) -> RpcResult<Nanos> {
+        Ok(Nanos::now())
+    }
 }
 
 #[rpc(client, server, namespace = "registry")]
