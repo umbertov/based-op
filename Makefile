@@ -447,10 +447,10 @@ FOLLOWER_NODE_HOST?=http://localhost
 BLOCK_NUMBER?=$(shell echo $$(( $$(cast block-number --rpc-url http://localhost:$(BOP_EL_PORT)) + 1 )))
 DUMMY_RICH_WALLET_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 DUMMY_TX=$(shell cast mktx --rpc-url  $(FOLLOWER_NODE_HOST):$(BOP_EL_PORT) --private-key $(DUMMY_RICH_WALLET_PRIVATE_KEY) --value 1 0x7DDcC7c49D562997A68C98ae7Bb62eD1E8E4488a | xxd -r -p | base64)
-LOCAL_GETH_PORT?=8645
+LOCAL_GETH_PORT?=8545
 
 test-tx:
-	cast send --rpc-url  http://0.0.0.0:$(LOCAL_GETH_PORT) --private-key $(DUMMY_RICH_WALLET_PRIVATE_KEY) --value 1 0x7DDcC7c49D562997A68C98ae7Bb62eD1E8E4488a
+	cast send --rpc-url http://localhost:$(LOCAL_GETH_PORT) --nonce 7 --private-key $(DUMMY_RICH_WALLET_PRIVATE_KEY) --value 1 0x9651f96565f5e9ac3a643590bb4e6a0d4b78a87d
 
 test-frag:
 	curl --request POST   --url $(FOLLOWER_NODE_HOST):$(BOP_NODE_PORT) --header 'Content-Type: application/json' \

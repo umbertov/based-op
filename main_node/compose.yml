@@ -37,7 +37,8 @@ services:
           --syncmode=full \
           --rpc.allow-unprotected-txs \
           --discovery.port=$OP_GETH_GOSSIP_PORT \
-          --port=$OP_GETH_GOSSIP_PORT
+          --port=$OP_GETH_GOSSIP_PORT \
+          --rollup.sequencerhttp=$PORTAL
     volumes:
       - ./data/geth:/data/geth
       - ./config:/config

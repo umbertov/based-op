@@ -38,7 +38,9 @@ use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{Instrument, Level, debug, error, info, trace};
 
-use crate::{cli::PortalArgs, middleware::ProxyService};
+use crate::{cli::PortalArgs, middleware::ProxyService, proxy::NodeGethPair};
+use jsonrpsee::server::HttpBody;
+
 
 pub type RpcClient = jsonrpsee::http_client::HttpClient;
 pub type AuthRpcClient = jsonrpsee::http_client::HttpClient<AuthClientService<HttpBackend>>;
@@ -79,18 +81,18 @@ impl Gateway {
 
 #[derive(Clone)]
 pub struct PortalServer {
-    fallback_eth_client: RpcClient,
-    fallback_client: AuthRpcClient,
-    op_node_client: RpcClient,
-    registry_client: RpcClient,
-    current_gateway_candidate: Arc<Mutex<Option<Gateway>>>,
-    current_gateway: Arc<Mutex<Option<Gateway>>>,
-    gateway_timeout: Duration,
-    gateways: Arc<RwLock<Vec<Gateway>>>,
-    new_payload_block_number: Arc<AtomicU64>,
-    new_payload_block_hash: Arc<Mutex<B256>>,
-    current_block_number: Arc<AtomicU64>,
-    args: Arc<PortalArgs>,
+    pub fallback_eth_client: RpcClient,
+    pub fallback_client: AuthRpcClient,
+    pub op_node_client: RpcClient,
+    pub registry_client: RpcClient,
+    pub current_gateway_candidate: Arc<Mutex<Option<Gateway>>>,
+    pub current_gateway: Arc<Mutex<Option<Gateway>>>,
+    pub gateway_timeout: Duration,
+    pub gateways: Arc<RwLock<Vec<Gateway>>>,
+    pub new_payload_block_number: Arc<AtomicU64>,
+    pub new_payload_block_hash: Arc<Mutex<B256>>,
+    pub current_block_number: Arc<AtomicU64>,
+    pub args: Arc<PortalArgs>,
 }
 
 impl PortalServer {
@@ -172,7 +174,6 @@ impl PortalServer {
         // temp: remove when factoring out the portal
         let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
         let cors_middleware = ServiceBuilder::new().layer(cors);
-
         let server = ServerBuilder::default()
             .max_request_body_size(u32::MAX)
             .max_response_body_size(u32::MAX)
@@ -197,17 +198,6 @@ impl PortalServer {
             }
         });
         let server_handle = server.start(module);
-
-        tokio::select! {
-            _ = server_handle.stopped() => {
-                error!("server stopped");
-            }
-
-            _ = wait_for_signal() => {
-                info!("received signal, shutting down");
-            }
-        }
-
         Ok(())
     }
 
@@ -847,6 +837,13 @@ impl RegistryApiServer for PortalServer {
     }
 }
 
+fn create_gateway_client(url: Url, jwt_str: String, address: Address, timeout: Duration) -> eyre::Result<Gateway> {
+    let jwt = JwtSecret::from_hex(&jwt_str).map_err(|_| eyre::eyre!("Invalid JWT secret"))?;
+    let client = create_auth_client(url.clone(), jwt, timeout)?;
+    let gateway_client = Gateway::new(url, client, jwt_str, address);
+    Ok(gateway_client)
+}
+
 fn create_client(url: Url, timeout: Duration) -> eyre::Result<RpcClient> {
     let client = HttpClientBuilder::default()
         .max_request_size(u32::MAX)
@@ -868,11 +865,4 @@ fn create_auth_client(url: Url, jwt: JwtSecret, timeout: Duration) -> eyre::Resu
         .build(url)?;
 
     Ok(client)
-}
-
-fn create_gateway_client(url: Url, jwt_str: String, address: Address, timeout: Duration) -> eyre::Result<Gateway> {
-    let jwt = JwtSecret::from_hex(&jwt_str).map_err(|_| eyre::eyre!("Invalid JWT secret"))?;
-    let client = create_auth_client(url.clone(), jwt, timeout)?;
-    let gateway_client = Gateway::new(url, client, jwt_str, address);
-    Ok(gateway_client)
 }
