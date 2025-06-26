@@ -90,12 +90,12 @@ def node_opp2p_blocked_peers(op_node_url):
     response = requests.post(op_node_url, json=opp2p_blocked_peers_payload)
     return response.json()['result']
 
-def node_disconnect_all_peers(op_node_url):
-    opp2p_peers = node_opp2p_peers(op_node_url)['result']['peers']
-    for peer_id in opp2p_peers:
-        node_opp2p_disconnect_peer(op_node_url, peer_id)
-    print(f"Disconnected all peers from {op_node_url}. Total peers disconnected: {len(opp2p_peers)}")
-        
+def node_disconnect_all_peers(op_node_urls):
+    buff = [node_opp2p_peers(op_node_url)['result']['peers'] for op_node_url in op_node_urls]
+    for i, op_node_url in enumerate(op_node_urls):
+        for peer_id in buff[i]:
+            node_opp2p_disconnect_peer(op_node_url, peer_id)
+        print(f"Disconnected all peers from {op_node_url}. Total peers disconnected: {len(buff[i])}")
 
 def node_block_all_peers(op_node_url):
     opp2p_peers = node_opp2p_peers(op_node_url)['result']['peers']
@@ -241,6 +241,9 @@ while True:
             node_unblock_all_peers(op_node_url)
             node_unblock_all_peers(op_node_url2)
             p2p_setup()
+            continue
+        case "unpair":
+            node_disconnect_all_peers([op_node_url, op_node_url2])
             continue
         case _:
             print("Unknown command. Use 'start', 'stop', or 'exit'.")
