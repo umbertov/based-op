@@ -5,7 +5,7 @@ use clap::Parser;
 use cli::PortalArgs;
 use reth_rpc_layer::JwtSecret;
 use server::PortalServer;
-use tracing::info;
+use tracing::{info, error};
 use std::sync::Arc;
 use reqwest::Url;
 
@@ -51,10 +51,28 @@ async fn main() -> eyre::Result<()> {
     let t2 = proxy1.run().await?;
     let t3 = proxy2.run().await?;
 
+    let t4 = tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+        proxy1.pair_node_p2p(&proxy2).await.unwrap_or({
+            error!("Failed to pair nodes");
+        });
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            info!("");
+            info!("Current Safe L2 state:");
+            info!("Node1: {}", proxy1.get_current_safe_l2().await);
+            info!("Node2: {}", proxy2.get_current_safe_l2().await);
+            info!("Current Unsafe L2 state:");
+            info!("Node1: {}", proxy1.get_current_unsafe_l2().await);
+            info!("Node2: {}", proxy2.get_current_unsafe_l2().await);
+        }
+    });
+
     tokio::select! {
         // _ = t1.stopped() => {},
         _ = t2.stopped() => {},
         _ = t3.stopped() => {},
+        _ = t4 => {},
     }
 
     Ok(())

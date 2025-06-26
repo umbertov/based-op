@@ -226,6 +226,10 @@ pub trait OpNodeP2PApi {
     async fn peer_info(&self) -> RpcResult<OpPeerInfo>;
     #[method(name = "peers")]
     async fn peers(&self, _t: bool) -> RpcResult<OpPeers>;
+    #[method(name = "connectPeer")]
+    async fn connect_peer(&self, multiaddr: String) -> RpcResult<()>;
+    #[method(name = "disconnectPeer")]
+    async fn disconnect_peer(&self, peer_id: String) -> RpcResult<()>;
 }
 
 #[rpc(client, server, namespace = "admin")]

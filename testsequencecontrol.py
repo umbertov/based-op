@@ -65,16 +65,49 @@ def node_opp2p_peers(op_node_url):
     response = requests.post(op_node_url, json=opp2p_peers_payload)
     return response.json()
 
-def node_opp2p_connect_peer(op_node_url, enr):
-    opp2p_connect_peer_payload = json.loads('{"jsonrpc":"2.0","method":"opp2p_connectPeer","params":["' + enr + '"],"id":1}')
+def node_opp2p_connect_peer(op_node_url, multiaddr):
+    opp2p_connect_peer_payload = json.loads('{"jsonrpc":"2.0","method":"opp2p_connectPeer","params":["' + multiaddr + '"],"id":1}')
     response = requests.post(op_node_url, json=opp2p_connect_peer_payload)
     return response.json()
 
-op_node_url = "http://localhost:9545"
-op_geth_url = "http://localhost:8545"
+def node_opp2p_disconnect_peer(op_node_url, peer_id):
+    opp2p_disconnect_peer_payload = json.loads('{"jsonrpc":"2.0","method":"opp2p_disconnectPeer","params":["' + peer_id + '"],"id":1}')
+    response = requests.post(op_node_url, json=opp2p_disconnect_peer_payload)
+    return response.json()
 
-op_node_url2 = "http://localhost:19545"
-op_geth_url2 = "http://localhost:18545"
+def node_opp2p_block_peer(op_node_url, peer_id):
+    opp2p_block_peer_payload = json.loads('{"jsonrpc":"2.0","method":"opp2p_blockPeer","params":["' + peer_id + '"],"id":1}')
+    response = requests.post(op_node_url, json=opp2p_block_peer_payload)
+    return response.json()
+
+def node_opp2p_unblock_peer(op_node_url, peer_id):
+    opp2p_unblock_peer_payload = json.loads('{"jsonrpc":"2.0","method":"opp2p_unblockPeer","params":["' + peer_id + '"],"id":1}')
+    response = requests.post(op_node_url, json=opp2p_unblock_peer_payload)
+    return response.json()
+
+def node_opp2p_blocked_peers(op_node_url):
+    opp2p_blocked_peers_payload = json.loads('{"jsonrpc":"2.0","method":"opp2p_listBlockedPeers","params":[],"id":1}')
+    response = requests.post(op_node_url, json=opp2p_blocked_peers_payload)
+    return response.json()['result']
+
+def node_disconnect_all_peers(op_node_url):
+    opp2p_peers = node_opp2p_peers(op_node_url)['result']['peers']
+    for peer_id in opp2p_peers:
+        node_opp2p_disconnect_peer(op_node_url, peer_id)
+    print(f"Disconnected all peers from {op_node_url}. Total peers disconnected: {len(opp2p_peers)}")
+        
+
+def node_block_all_peers(op_node_url):
+    opp2p_peers = node_opp2p_peers(op_node_url)['result']['peers']
+    for peer_id in opp2p_peers:
+        node_opp2p_block_peer(op_node_url, peer_id)
+    print(f"Blocked all peers from {op_node_url}. Total peers blocked: {len(opp2p_peers)}")
+
+def node_unblock_all_peers(op_node_url):
+    blocked_peers = node_opp2p_blocked_peers(op_node_url)
+    for peer_id in blocked_peers:
+        node_opp2p_unblock_peer(op_node_url, peer_id)
+    print(f"Unblocked all peers from {op_node_url}. Total peers unblocked: {len(blocked_peers)}")
 
 def p2p_info():
     print(get_node_info("http://localhost:8545"))
@@ -158,26 +191,57 @@ def switch_sequencer():
     
     print(response)
 
-start_sequencer(op_node_url2, op_geth_url2)
+op_node_url = "http://localhost:9545"
+op_geth_url = "http://localhost:8545"
 
-monitor_sync_status()
-p2p_setup()
-# print(stop_sequencer(op_node_url2))
-monitor_head()
+op_node_url2 = "http://localhost:19545"
+op_geth_url2 = "http://localhost:18545"
 
-# while True:
-#     match(input(">")):
-#         case "start":
-#             print("Starting sequencer...")
-#             response = start_sequencer()
-#             print(response)
-#         case "stop":
-#             print("Stopping sequencer...")
-#             response = stop_sequencer()
-#             print(response)
-#         case "exit":
-#             print("Exiting...")
-#             break
-#         case _:
-#             print("Unknown command. Use 'start', 'stop', or 'exit'.")
-#             continue
+# node_block_all_peers(op_node_url)
+# node_block_all_peers(op_node_url2)
+# node_disconnect_all_peers(op_node_url)
+# node_disconnect_all_peers(op_node_url2)
+
+
+# print(node_opp2p_peers(op_node_url))
+
+# start_sequencer(op_node_url2, op_geth_url2)
+
+# monitor_sync_status()
+# p2p_setup()
+# # print(stop_sequencer(op_node_url2))
+# monitor_head()
+
+while True:
+    match(input(">")):
+        case "start":
+            print("Starting sequencer...")
+            response = start_sequencer()
+            print(response)
+            continue
+        case "stop":
+            print("Stopping sequencer...")
+            response = stop_sequencer()
+            print(response)
+            continue
+        case "exit":
+            print("Exiting...")
+            continue
+        case "block":
+            node_block_all_peers(op_node_url)
+            node_block_all_peers(op_node_url2)
+            node_disconnect_all_peers(op_node_url)
+            node_disconnect_all_peers(op_node_url2)
+            continue
+        case "unblock":
+            node_unblock_all_peers(op_node_url)
+            node_unblock_all_peers(op_node_url2)
+            continue
+        case "pair":
+            node_unblock_all_peers(op_node_url)
+            node_unblock_all_peers(op_node_url2)
+            p2p_setup()
+            continue
+        case _:
+            print("Unknown command. Use 'start', 'stop', or 'exit'.")
+            continue

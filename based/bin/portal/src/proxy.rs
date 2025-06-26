@@ -86,7 +86,7 @@ impl NodeGethPair {
         })
     }
 
-    pub async fn run(self) -> eyre::Result<(ServerHandle)> {
+    pub async fn run(&self) -> eyre::Result<(ServerHandle)> {
         // Clone the necessary fields before moving into the closure
         let op_geth_client = self.op_geth_client.clone();
         let op_geth_engine_client = self.op_geth_engine_client.clone();
@@ -275,6 +275,31 @@ impl EngineApiServer for NodeGethPair {
                 Err(_err) => Err(RpcError::Internal),
             }
         }
+    }
+}
+
+impl NodeGethPair {
+    pub async fn get_current_unsafe_l2(&self) -> B256 {
+        match self.op_node_client.sync_status().await {
+            Ok(status) => status.unsafe_l2.hash,
+            Err(err) => B256::ZERO
+        }
+    }
+
+    pub async fn get_current_safe_l2(&self) -> B256 {
+        match self.op_node_client.sync_status().await {
+            Ok(status) => status.safe_l2.hash,
+            Err(err) => B256::ZERO
+        }
+    }
+
+    pub async fn pair_node_p2p(&self, other: &NodeGethPair) -> eyre::Result<()> {
+        let multi_address_self = self.op_node_client.peer_info().await?.addresses[0].clone();
+        let multi_address_other = other.op_node_client.peer_info().await?.addresses[0].clone();
+        self.op_node_client.connect_peer(multi_address_other.clone()).await?;
+        other.op_node_client.connect_peer(multi_address_self.clone()).await?;
+
+        Ok(())
     }
 }
 
