@@ -33,6 +33,22 @@ pub const PORTAL_CAPABILITIES: &[&str] = &[
     // "eth_getBalance",
 ];
 
+pub const PROXY_CAPABILITIES: &[&str] = &[
+    // "engine_forkchoiceUpdatedV3",
+    // "engine_getPayloadV3",
+    // "engine_getPayloadV4",
+    // "engine_newPayloadV3",
+    // "engine_newPayloadV4",
+    // "eth_sendRawTransaction",
+    // "eth_getTransactionReceipt",
+    // "eth_getBlockByNumber",
+    // "eth_getBlockByHash",
+    // "eth_blockNumber",
+    // "eth_getTransactionCount",
+    // "eth_getBalance",
+];
+
+
 pub type OpRpcBlock = alloy_rpc_types::Block<OpTxEnvelope>;
 
 /// The Engine API is used by the consensus layer to interact with the execution layer. Here we

@@ -24,9 +24,9 @@ use bop_common::{
     utils::{uuid, wait_for_signal},
 };
 use jsonrpsee::{
-    core::{ClientError, async_trait},
-    http_client::{HttpClientBuilder, transport::HttpBackend},
-    server::{RpcServiceBuilder, ServerBuilder},
+    core::{async_trait, ClientError},
+    http_client::{transport::HttpBackend, HttpClientBuilder},
+    server::{RpcServiceBuilder, ServerBuilder, ServerHandle},
 };
 use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
@@ -154,7 +154,7 @@ impl PortalServer {
         Ok(temp)
     }
 
-    pub async fn run(self, addr: SocketAddr) -> eyre::Result<()> {
+    pub async fn run(self, addr: SocketAddr) -> eyre::Result<(ServerHandle)> {
         let fallback_client = self.fallback_client.clone();
         let fallback_eth_client = self.fallback_eth_client.clone();
         let op_node_client = self.op_node_client.clone();
@@ -198,7 +198,7 @@ impl PortalServer {
             }
         });
         let server_handle = server.start(module);
-        Ok(())
+        Ok(server_handle)
     }
 
     fn gateways(&self) -> Vec<Gateway> {

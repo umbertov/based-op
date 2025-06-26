@@ -62,7 +62,7 @@ where
                 let r: Result<serde_json::Value, jsonrpsee::core::ClientError> = match req.method_name().split_once('_')
                 {
                     Some(("engine", _)) => {
-                        debug!(method = %req.method_name(), "forwarding request to fallback");
+                        debug!(method = %req.method_name(), "forwarding request to eth engine fallback");
                         fallback_client.clone().request(req.method_name(), params).await
                     }
                     Some(("eth", _)) => {

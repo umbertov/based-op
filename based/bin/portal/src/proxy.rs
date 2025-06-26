@@ -15,7 +15,7 @@ use alloy_rpc_types::{
 use bop_common::{
     api::{
         ControlApiClient, EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient,
-        OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PortalApiServer, RegistryApiClient,
+        OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PROXY_CAPABILITIES, PortalApiServer, RegistryApiClient,
         RegistryApiServer,
     },
     communication::messages::{RpcError, RpcResult},
@@ -23,9 +23,9 @@ use bop_common::{
     utils::{uuid, wait_for_signal},
 };
 use jsonrpsee::{
-    core::{ClientError, async_trait},
-    http_client::{HttpClientBuilder, transport::HttpBackend},
-    server::{RpcServiceBuilder, ServerBuilder},
+    core::{async_trait, ClientError},
+    http_client::{transport::HttpBackend, HttpClientBuilder},
+    server::{RpcServiceBuilder, ServerBuilder, ServerHandle},
 };
 use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
@@ -81,23 +81,22 @@ impl NodeGethPair {
             op_geth_engine_client,
             portal: args.portal,
             head_hash: B256::ZERO,
-            active: Arc::new(RwLock::new(true)),
+            active: Arc::new(RwLock::new(false)),
             ingress_addr: args.ingress_addr,
         })
     }
 
-    pub async fn run(self) -> eyre::Result<()> {
+    pub async fn run(self) -> eyre::Result<(ServerHandle)> {
         // Clone the necessary fields before moving into the closure
         let op_geth_client = self.op_geth_client.clone();
         let op_geth_engine_client = self.op_geth_engine_client.clone();
         let op_node_client = self.op_node_client.clone();
         let registry_client = self.portal.registry_client.clone();
         let ingress_addr = self.ingress_addr;
-        let portal_capabilities = PORTAL_CAPABILITIES;
 
         let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
             ProxyService::new(
-                portal_capabilities,
+                PROXY_CAPABILITIES,
                 s,
                 op_geth_client.clone(),
                 op_geth_engine_client.clone(),
@@ -120,18 +119,7 @@ impl NodeGethPair {
         module.merge(EthApiServer::into_rpc(self.clone())).expect("failed to merge modules");
 
         let server_handle = server.start(module);
-
-        tokio::select! {
-            _ = server_handle.stopped() => {
-                error!("server stopped");
-            }
-
-            _ = wait_for_signal() => {
-                info!("received signal, shutting down");
-            }
-        }
-
-        Ok(())
+        Ok(server_handle)
     }
 }
 
