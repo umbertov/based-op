@@ -39,7 +39,7 @@ pub const PROXY_CAPABILITIES: &[&str] = &[
     "engine_getPayloadV4",
     "engine_newPayloadV3",
     "engine_newPayloadV4",
-    // "eth_sendRawTransaction",
+    "eth_sendRawTransaction",
     // "eth_getTransactionReceipt",
     // "eth_getBlockByNumber",
     // "eth_getBlockByHash",
@@ -47,7 +47,6 @@ pub const PROXY_CAPABILITIES: &[&str] = &[
     // "eth_getTransactionCount",
     // "eth_getBalance",
 ];
-
 
 pub type OpRpcBlock = alloy_rpc_types::Block<OpTxEnvelope>;
 
@@ -227,7 +226,7 @@ pub trait OpNodeAdminApi {
 
     /// stop sequencer
     #[method(name = "stopSequencer")]
-    async fn stop_sequencer(&self) -> RpcResult<()>;
+    async fn stop_sequencer(&self) -> RpcResult<B256>;
 
     /// stop sequencer
     #[method(name = "sequencerActive")]

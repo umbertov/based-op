@@ -24,9 +24,9 @@ use bop_common::{
     utils::{uuid, wait_for_signal},
 };
 use jsonrpsee::{
-    core::{async_trait, ClientError},
-    http_client::{transport::HttpBackend, HttpClientBuilder},
-    server::{RpcServiceBuilder, ServerBuilder, ServerHandle},
+    core::{ClientError, async_trait},
+    http_client::{HttpClientBuilder, transport::HttpBackend},
+    server::{HttpBody, RpcServiceBuilder, ServerBuilder, ServerHandle},
 };
 use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
@@ -38,9 +38,7 @@ use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{Instrument, Level, debug, error, info, trace};
 
-use crate::{cli::PortalArgs, middleware::ProxyService, proxy::NodeGethPairInner};
-use jsonrpsee::server::HttpBody;
-
+use crate::{cli::PortalArgs, middleware::ProxyService, proxy::NodeGethPair};
 
 pub type RpcClient = jsonrpsee::http_client::HttpClient;
 pub type AuthRpcClient = jsonrpsee::http_client::HttpClient<AuthClientService<HttpBackend>>;
@@ -81,9 +79,6 @@ impl Gateway {
 
 #[derive(Clone)]
 pub struct PortalServerInner {
-    pub fallback_eth_client: RpcClient,
-    pub fallback_client: AuthRpcClient,
-    pub op_node_client: RpcClient,
     pub registry_client: RpcClient,
     pub current_gateway_candidate: Arc<Mutex<Option<Gateway>>>,
     pub current_gateway: Arc<Mutex<Option<Gateway>>>,
@@ -93,6 +88,7 @@ pub struct PortalServerInner {
     pub new_payload_block_hash: Arc<Mutex<B256>>,
     pub current_block_number: Arc<AtomicU64>,
     pub args: Arc<PortalArgs>,
+    pub current_proxy: Arc<Mutex<Option<NodeGethPair>>>,
 }
 
 #[derive(Clone)]
@@ -109,18 +105,30 @@ impl PortalServer {
 
 impl PortalServer {
     pub async fn run(&self, addr: SocketAddr) -> eyre::Result<(ServerHandle)> {
-        let fallback_client = self.inner.fallback_client.clone();
-        let fallback_eth_client = self.inner.fallback_eth_client.clone();
-        let op_node_client = self.inner.op_node_client.clone();
         let registry_client = self.inner.registry_client.clone();
 
+        let self_clone = self.clone();
         let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
+            // let rt = tokio::runtime::Handle::current();
+            // let guard = rt.block_on(self_clone.inner.current_proxy.lock());
+            // let current_proxy =
+            //     <std::option::Option<NodeGethPair> as Clone>::clone(&(*guard)).expect("No current proxy set");
+            let current_proxy = tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                // Now we can block on the future inside block_in_place
+                let guard = rt.block_on(self_clone.inner.current_proxy.lock());
+                <std::option::Option<NodeGethPair> as Clone>::clone(&(*guard)).expect("No current proxy set")
+            });
+            let op_geth_client = current_proxy.inner.op_geth_client.clone();
+            let op_geth_engine_client = current_proxy.inner.op_geth_engine_client.clone();
+            let op_node_client = current_proxy.inner.op_node_client.clone();
+
             ProxyService::new(
                 PORTAL_CAPABILITIES,
                 s,
-                fallback_eth_client.clone(),
-                fallback_client.clone(),
-                op_node_client.clone(),
+                op_geth_client,
+                op_geth_engine_client,
+                op_node_client,
                 registry_client.clone(),
             )
         });
@@ -140,10 +148,10 @@ impl PortalServer {
         module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
         module.merge(PortalApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
 
-        let inner = self.inner.clone();
+        let self_clone = self.clone();
         tokio::spawn(async move {
             loop {
-                match inner.refresh_gateway_list().await {
+                match self_clone.inner.refresh_gateway_list().await {
                     Ok(_) => {}
                     Err(err) => {
                         error!(%err, "Failed to fetch registered gateways");
@@ -159,18 +167,6 @@ impl PortalServer {
 
 impl PortalServerInner {
     pub async fn new(args: PortalArgs) -> eyre::Result<Self> {
-        let fallback_jwt = args.fallback_jwt();
-
-        let fallback_eth_client =
-            create_client(args.fallback_eth_url.clone(), Duration::from_millis(args.fallback_timeout_ms))?;
-
-        let op_node_client = create_client(args.op_node_url.clone(), Duration::from_millis(args.fallback_timeout_ms))?;
-
-        let fallback_client = create_auth_client(
-            args.fallback_url.clone(),
-            fallback_jwt,
-            Duration::from_millis(args.fallback_timeout_ms),
-        )?;
         let registry_client =
             create_client(args.registry_url.clone(), Duration::from_millis(args.registry_timeout_ms))?;
 
@@ -180,9 +176,6 @@ impl PortalServerInner {
         let gateways = Arc::new(RwLock::new(gateways));
 
         let temp = Self {
-            fallback_eth_client,
-            fallback_client,
-            op_node_client,
             registry_client,
             current_gateway_candidate: Arc::new(Mutex::new(None)),
             current_gateway: Arc::new(Mutex::new(None)),
@@ -192,6 +185,7 @@ impl PortalServerInner {
             new_payload_block_hash: Arc::new(Mutex::new(B256::ZERO)),
             current_block_number: Arc::new(AtomicU64::new(0)),
             args: Arc::new(args),
+            current_proxy: Arc::new(Mutex::new(None)),
         };
 
         match temp.refresh_gateway_list().await {
@@ -351,6 +345,11 @@ impl PortalServerInner {
         }
         debug!(?gateway, "served fcu")
     }
+
+    pub async fn set_current_proxy(&self, proxy: NodeGethPair) {
+        let mut guard = self.current_proxy.lock().await;
+        (*guard) = Some(proxy);
+    }
 }
 
 /// This is a temporary API to broacast transactions to both gateway and fallback. In practice this should not be
@@ -369,7 +368,11 @@ impl EthApiServer for PortalServerInner {
             });
         }
 
-        let response = self.fallback_eth_client.send_raw_transaction(bytes).await?;
+        let op_geth_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_client.clone()
+        };
+        let response = op_geth_client.send_raw_transaction(bytes).await?;
         Ok(response)
     }
 
@@ -377,9 +380,13 @@ impl EthApiServer for PortalServerInner {
     async fn transaction_receipt(&self, hash: B256) -> RpcResult<Option<OpTransactionReceipt>> {
         debug!(%hash, "new request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn(
             {
-                let client = self.fallback_client.clone();
+                let client = op_geth_engine_client.clone();
                 async move { client.transaction_receipt(hash).await }
             }
             .in_current_span(),
@@ -404,9 +411,13 @@ impl EthApiServer for PortalServerInner {
     async fn block_by_number(&self, number: BlockNumberOrTag, full: bool) -> RpcResult<Option<OpRpcBlock>> {
         debug!(%number, full, "new request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn(
             {
-                let client = self.fallback_client.clone();
+                let client = op_geth_engine_client.clone();
                 async move { client.block_by_number(number, full).await }
             }
             .in_current_span(),
@@ -432,9 +443,13 @@ impl EthApiServer for PortalServerInner {
     async fn block_by_hash(&self, hash: B256, full: bool) -> RpcResult<Option<OpRpcBlock>> {
         debug!(%hash, full, "new request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn(
             {
-                let client = self.fallback_client.clone();
+                let client = op_geth_engine_client.clone();
                 async move { client.block_by_hash(hash, full).await }
             }
             .in_current_span(),
@@ -457,9 +472,13 @@ impl EthApiServer for PortalServerInner {
     async fn block_number(&self) -> RpcResult<U256> {
         debug!("block number request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn(
             {
-                let client = self.fallback_client.clone();
+                let client = op_geth_engine_client.clone();
                 async move { client.block_number().await }
             }
             .in_current_span(),
@@ -482,9 +501,13 @@ impl EthApiServer for PortalServerInner {
     async fn transaction_count(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
         debug!(%address, ?block_number, "new request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn(
             {
-                let client = self.fallback_client.clone();
+                let client = op_geth_engine_client.clone();
                 async move { client.transaction_count(address, block_number).await }
             }
             .in_current_span(),
@@ -508,9 +531,13 @@ impl EthApiServer for PortalServerInner {
     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
         debug!(%address, ?block_number, "new request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn(
             {
-                let client = self.fallback_client.clone();
+                let client = op_geth_engine_client.clone();
                 async move { client.balance(address, block_number).await }
             }
             .in_current_span(),
@@ -560,8 +587,12 @@ impl EngineApiServer for PortalServerInner {
             };
         }
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let response =
-            self.fallback_client.fork_choice_updated_v3(fork_choice_state, payload_attributes.clone()).await?;
+            op_geth_engine_client.fork_choice_updated_v3(fork_choice_state, payload_attributes.clone()).await?;
 
         if let Some(current_gateway) = self.current_gateway.as_ref().lock().await.clone() {
             if payload_attributes.is_some() {
@@ -600,8 +631,11 @@ impl EngineApiServer for PortalServerInner {
         self.new_payload_block_number.store(block_number, Ordering::Relaxed);
         *self.new_payload_block_hash.lock().await = block_hash;
 
-        let response = self
-            .fallback_client
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
+        let response = op_geth_engine_client
             .new_payload_v4(payload.clone(), versioned_hashes.clone(), parent_beacon_block_root, requests.clone())
             .await
             .inspect_err(|e| tracing::error!("issue sending new_payload_v4 to el {e}"))?;
@@ -657,8 +691,11 @@ impl EngineApiServer for PortalServerInner {
         self.new_payload_block_number.store(block_number, Ordering::Relaxed);
         *self.new_payload_block_hash.lock().await = block_hash;
 
-        let response = self
-            .fallback_client
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
+        let response = op_geth_engine_client
             .new_payload_v3(payload.clone(), versioned_hashes.clone(), parent_beacon_block_root)
             .await?;
 
@@ -692,8 +729,12 @@ impl EngineApiServer for PortalServerInner {
     async fn get_payload_v4(&self, payload_id: PayloadId) -> RpcResult<OpExecutionPayloadEnvelopeV4> {
         debug!(%payload_id, "new request");
 
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+        };
         let fallback_fut = tokio::spawn({
-            let client = self.fallback_client.clone();
+            let client = op_geth_engine_client.clone();
 
             async move { client.get_payload_v4(payload_id).await }
         });
@@ -703,7 +744,7 @@ impl EngineApiServer for PortalServerInner {
         let gateway_fut: tokio::task::JoinHandle<Result<OpExecutionPayloadEnvelopeV4, _>> = tokio::spawn(
             {
                 // only get payload from previously picked gateway
-                let fallback_client = self.fallback_client.clone();
+                let fallback_client = op_geth_engine_client.clone();
 
                 async move {
                     let gateway_payload = gateway
@@ -766,12 +807,20 @@ impl EngineApiServer for PortalServerInner {
 impl PortalApiServer for PortalServerInner {
     /// The network id of the l2
     async fn l2_chain_id(&self) -> RpcResult<u64> {
-        Ok(self.op_node_client.rollup_config().await.map(|config| config.l2_chain_id)?)
+        let op_node_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+        };
+        Ok(op_node_client.rollup_config().await.map(|config| config.l2_chain_id)?)
     }
 
     /// The network id of the l1
     async fn l1_chain_id(&self) -> RpcResult<u64> {
-        Ok(self.op_node_client.rollup_config().await.map(|config| config.l1_chain_id)?)
+        let op_node_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+        };
+        Ok(op_node_client.rollup_config().await.map(|config| config.l1_chain_id)?)
     }
 
     /// rollup.json file
@@ -788,19 +837,31 @@ impl PortalApiServer for PortalServerInner {
 
     /// The gossip static address string used by the op-node
     async fn op_node_gossip_static(&self) -> RpcResult<String> {
-        Ok(self.op_node_client.peer_info().await.and_then(|p| {
+        let op_node_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+        };
+        Ok(op_node_client.peer_info().await.and_then(|p| {
             p.addresses.last().cloned().map(Ok).unwrap_or(Err(ClientError::Custom("empty peer addresses".to_string())))
         })?)
     }
 
     /// The enr that can be used to sync with the op-node
     async fn op_node_bootnode_enr(&self) -> RpcResult<String> {
-        Ok(self.op_node_client.peer_info().await.map(|p| p.enr)?)
+        let op_node_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+        };
+        Ok(op_node_client.peer_info().await.map(|p| p.enr)?)
     }
 
     /// The enode that can be used to sync with the op-geth
     async fn op_geth_bootnode_enode(&self) -> RpcResult<String> {
-        Ok(self.fallback_eth_client.node_info().await.map(|p| p.enode)?)
+        let op_geth_client = {
+            let guard = self.current_proxy.lock().await;
+            guard.as_ref().expect("No current proxy set").inner.op_geth_client.clone()
+        };
+        Ok(op_geth_client.node_info().await.map(|p| p.enode)?)
     }
 }
 

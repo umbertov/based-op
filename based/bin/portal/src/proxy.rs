@@ -2,29 +2,31 @@ use std::{
     fmt,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering}, Arc
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
 use alloy_eips::eip7685::RequestsOrHash;
 use alloy_primitives::{Address, B256, Bytes, U256, hex};
 use alloy_rpc_types::{
-    engine::{payload, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus}, BlockId, BlockNumberOrTag
+    BlockId, BlockNumberOrTag,
+    engine::{ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus, payload},
 };
 use bop_common::{
     api::{
         ControlApiClient, EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient,
-        OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PROXY_CAPABILITIES, PortalApiServer, RegistryApiClient,
-        RegistryApiServer,
+        OpNodeAdminApiClient, OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PROXY_CAPABILITIES,
+        PortalApiServer, RegistryApiClient, RegistryApiServer,
     },
     communication::messages::{RpcError, RpcResult},
     time::{Duration, Instant},
     utils::{uuid, wait_for_signal},
 };
 use jsonrpsee::{
-    core::{async_trait, ClientError},
-    http_client::{transport::HttpBackend, HttpClientBuilder},
-    server::{RpcServiceBuilder, ServerBuilder, ServerHandle},
+    core::{ClientError, async_trait},
+    http_client::{HttpClientBuilder, transport::HttpBackend},
+    server::{HttpBody, RpcServiceBuilder, ServerBuilder, ServerHandle},
 };
 use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
@@ -34,10 +36,9 @@ use reth_rpc_layer::{AuthClientLayer, AuthClientService, JwtSecret};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{debug, error, info, trace, warn, Instrument, Level};
+use tracing::{Instrument, Level, debug, error, info, trace, warn};
 
 use crate::{cli::PortalArgs, middleware::ProxyService, server::PortalServer};
-use jsonrpsee::server::HttpBody;
 
 pub type RpcClient = jsonrpsee::http_client::HttpClient;
 pub type AuthRpcClient = jsonrpsee::http_client::HttpClient<AuthClientService<HttpBackend>>;
@@ -63,6 +64,7 @@ pub struct NodeGethPairInner {
     pub ingress_addr: SocketAddr,
 }
 
+#[derive(Clone)]
 pub struct NodeGethPair {
     pub inner: Arc<NodeGethPairInner>,
 }
@@ -70,41 +72,24 @@ pub struct NodeGethPair {
 impl NodeGethPair {
     pub async fn new(args: NodeGethPairArgs) -> Self {
         let inner = NodeGethPairInner::new(args).await.expect("Failed to create NodeGethPairInner");
-        NodeGethPair {
-            inner: Arc::new(inner),
-        }
+        NodeGethPair { inner: Arc::new(inner) }
     }
-}
 
-impl NodeGethPairInner {
-    pub async fn new(args: NodeGethPairArgs) -> eyre::Result<Self> {
-        let timeout = Duration::from_millis(args.timeout_ms);
-        let op_node_client = create_client(args.op_node_url.clone(), timeout)?;
-        let op_geth_client = create_client(args.op_geth_url.clone(), timeout)?;
-        let op_geth_engine_client = create_auth_client(
-            args.op_geth_engine_url,
-            args.op_geth_engine_jwt,
-            timeout,
-        )?;
+    pub async fn activate(&self) {
+        self.inner.active.store(true, Ordering::Relaxed);
+    }
 
-        Ok(NodeGethPairInner {
-            op_node_client,
-            op_geth_client,
-            op_geth_engine_client,
-            portal: args.portal,
-            head_hash: B256::ZERO,
-            active: Arc::new(AtomicBool::new(false)),
-            ingress_addr: args.ingress_addr,
-        })
+    pub async fn deactivate(&self) {
+        self.inner.active.store(false, Ordering::Relaxed);
     }
 
     pub async fn run(&self) -> eyre::Result<(ServerHandle)> {
         // Clone the necessary fields before moving into the closure
-        let op_geth_client = self.op_geth_client.clone();
-        let op_geth_engine_client = self.op_geth_engine_client.clone();
-        let op_node_client = self.op_node_client.clone();
-        let registry_client = self.portal.inner.registry_client.clone();
-        let ingress_addr = self.ingress_addr;
+        let op_geth_client = self.inner.op_geth_client.clone();
+        let op_geth_engine_client = self.inner.op_geth_engine_client.clone();
+        let op_node_client = self.inner.op_node_client.clone();
+        let registry_client = self.inner.portal.inner.registry_client.clone();
+        let ingress_addr = self.inner.ingress_addr;
 
         let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
             ProxyService::new(
@@ -127,15 +112,73 @@ impl NodeGethPairInner {
             .build(ingress_addr)
             .await?;
 
-        let mut module = EngineApiServer::into_rpc(self.clone());
-        module.merge(EthApiServer::into_rpc(self.clone())).expect("failed to merge modules");
+        let mut module = EngineApiServer::into_rpc((*self.inner).clone());
+        module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
 
         let server_handle = server.start(module);
         Ok(server_handle)
     }
 
-    pub fn set_active(&self, active: bool) {
-        self.active.store(active, Ordering::Relaxed);
+    pub async fn get_current_unsafe_l2(&self) -> B256 {
+        match self.inner.op_node_client.sync_status().await {
+            Ok(status) => status.unsafe_l2.hash,
+            Err(err) => B256::ZERO,
+        }
+    }
+
+    pub async fn get_current_safe_l2(&self) -> B256 {
+        match self.inner.op_node_client.sync_status().await {
+            Ok(status) => status.safe_l2.hash,
+            Err(err) => B256::ZERO,
+        }
+    }
+
+    pub async fn pair_node_p2p(&self, other: &NodeGethPair) -> eyre::Result<()> {
+        let multi_address_self = self.inner.op_node_client.peer_info().await?.addresses[0].clone();
+        let multi_address_other = other.inner.op_node_client.peer_info().await?.addresses[0].clone();
+        self.inner.op_node_client.connect_peer(multi_address_other.clone()).await?;
+        other.inner.op_node_client.connect_peer(multi_address_self.clone()).await?;
+
+        Ok(())
+    }
+
+    pub async fn start_sequencer(&self, head: B256) -> eyre::Result<()> {
+        match self.inner.op_node_client.start_sequencer(head).await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                error!(%err, "Failed to start sequencer");
+                Err(eyre::eyre!("Failed to start sequencer: {}", err))
+            }
+        }
+    }
+
+    pub async fn stop_sequencer(&self) -> eyre::Result<()> {
+        match self.inner.op_node_client.stop_sequencer().await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                error!(%err, "Failed to stop sequencer");
+                Err(eyre::eyre!("Failed to stop sequencer: {}", err))
+            }
+        }
+    }
+}
+
+impl NodeGethPairInner {
+    pub async fn new(args: NodeGethPairArgs) -> eyre::Result<Self> {
+        let timeout = Duration::from_millis(args.timeout_ms);
+        let op_node_client = create_client(args.op_node_url.clone(), timeout)?;
+        let op_geth_client = create_client(args.op_geth_url.clone(), timeout)?;
+        let op_geth_engine_client = create_auth_client(args.op_geth_engine_url, args.op_geth_engine_jwt, timeout)?;
+
+        Ok(NodeGethPairInner {
+            op_node_client,
+            op_geth_client,
+            op_geth_engine_client,
+            portal: args.portal,
+            head_hash: B256::ZERO,
+            active: Arc::new(AtomicBool::new(false)),
+            ingress_addr: args.ingress_addr,
+        })
     }
 }
 
@@ -236,8 +279,10 @@ impl EngineApiServer for NodeGethPairInner {
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<OpPayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
-        if self.active.read().clone() {
-            return self.portal.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
+        warn!("Forkchoice updated v3. {:?}", self.active.load(Ordering::Relaxed));
+
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
         } else {
             match self.op_geth_engine_client.fork_choice_updated_v3(fork_choice_state, payload_attributes).await {
                 Ok(payload) => Ok(payload),
@@ -254,10 +299,20 @@ impl EngineApiServer for NodeGethPairInner {
         parent_beacon_block_root: B256,
         requests: RequestsOrHash,
     ) -> RpcResult<PayloadStatus> {
-        if self.active.read().clone() {
-            return self.portal.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await;
+        warn!("New payload v4. {:?}", self.active.load(Ordering::Relaxed));
+
+        if self.active.load(Ordering::Relaxed) {
+            return self
+                .portal
+                .inner
+                .new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests)
+                .await;
         } else {
-            match self.op_geth_engine_client.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await {
+            match self
+                .op_geth_engine_client
+                .new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests)
+                .await
+            {
                 Ok(payload) => Ok(payload),
                 Err(_err) => Err(RpcError::Internal),
             }
@@ -271,8 +326,10 @@ impl EngineApiServer for NodeGethPairInner {
         versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
     ) -> RpcResult<PayloadStatus> {
-        if self.active.read().clone() {
-            return self.portal.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
+        warn!("New payload v3. {:?}", self.active.load(Ordering::Relaxed));
+
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
         } else {
             match self.op_geth_engine_client.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await {
                 Ok(payload) => Ok(payload),
@@ -283,39 +340,16 @@ impl EngineApiServer for NodeGethPairInner {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn get_payload_v4(&self, payload_id: PayloadId) -> RpcResult<OpExecutionPayloadEnvelopeV4> {
-        if self.active.read().clone() {
-            return self.portal.get_payload_v4(payload_id).await;
+        warn!("Get payload v4. {:?}", self.active.load(Ordering::Relaxed));
+
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.get_payload_v4(payload_id).await;
         } else {
             match self.op_geth_engine_client.get_payload_v4(payload_id).await {
                 Ok(payload) => Ok(payload),
                 Err(_err) => Err(RpcError::Internal),
             }
         }
-    }
-}
-
-impl NodeGethPairInner {
-    pub async fn get_current_unsafe_l2(&self) -> B256 {
-        match self.op_node_client.sync_status().await {
-            Ok(status) => status.unsafe_l2.hash,
-            Err(err) => B256::ZERO
-        }
-    }
-
-    pub async fn get_current_safe_l2(&self) -> B256 {
-        match self.op_node_client.sync_status().await {
-            Ok(status) => status.safe_l2.hash,
-            Err(err) => B256::ZERO
-        }
-    }
-
-    pub async fn pair_node_p2p(&self, other: &NodeGethPairInner) -> eyre::Result<()> {
-        let multi_address_self = self.op_node_client.peer_info().await?.addresses[0].clone();
-        let multi_address_other = other.op_node_client.peer_info().await?.addresses[0].clone();
-        self.op_node_client.connect_peer(multi_address_other.clone()).await?;
-        other.op_node_client.connect_peer(multi_address_self.clone()).await?;
-
-        Ok(())
     }
 }
 
