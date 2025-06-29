@@ -117,7 +117,7 @@ pub struct SpammedTx {
     pub sent_timestamp: Nanos,
     pub wallet: Address,
     pub nonce: u64,
-    pub hash: Option<B256>,
+    pub hash: B256,
     pub block: Option<u64>,
     pub receipt_timestamp: Option<Nanos>,
 }
@@ -155,7 +155,7 @@ impl ToRow for SpammedTx {
         vec![
             self.sent_timestamp.with_fmt("%d %H:%M:%S%.3f").into(),
             self.nonce.to_string().into(),
-            self.hash.map(|t| t.to_string()).unwrap_or_default().into(),
+            self.hash.to_string().into(),
             self.block.map(|t| t.to_string()).unwrap_or_default().into(),
             self.receipt_timestamp.map(|r| (r - self.sent_timestamp).to_string()).unwrap_or_default().into(),
         ]

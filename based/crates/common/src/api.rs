@@ -205,7 +205,6 @@ pub trait OpNodeApi {
 
 #[rpc(client, server, namespace = "opp2p")]
 pub trait OpNodeP2PApi {
-    /// The rollup config of the op-node
     #[method(name = "self")]
     async fn peer_info(&self) -> RpcResult<OpPeerInfo>;
     #[method(name = "peers")]
@@ -214,7 +213,6 @@ pub trait OpNodeP2PApi {
 
 #[rpc(client, server, namespace = "admin")]
 pub trait OpGethAdminApi {
-    /// The rollup config of the op-node
     #[method(name = "nodeInfo")]
     async fn node_info(&self) -> RpcResult<OpGethInfo>;
     #[method(name = "peers")]
@@ -470,6 +468,7 @@ pub struct GethPeerNetwork {
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct PeerProtocols {
+    pub handshake: Option<String>,
     pub eth: EthVersion,
     pub snap: SnapVersion,
 }

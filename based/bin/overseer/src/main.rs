@@ -3,6 +3,7 @@ mod data;
 mod prelude;
 mod statistics;
 mod timekeeper;
+mod tx_spammer;
 mod types;
 mod ui;
 mod utils;
@@ -165,12 +166,20 @@ impl OverseerConnections {
         self.runtime.block_on(self.client_portal.current_gateway()).map(|(_, url, address, _)| (url, address))
     }
 
+    pub fn peers_main_op_node(&self) -> Result<Vec<OpPeerInfo>, ClientError> {
+        self.runtime.block_on(self.client_portal.peers(true)).map(|p| p.peers.into_values().collect())
+    }
+
     pub fn peers_based_op_node(&self) -> Result<Vec<OpPeerInfo>, ClientError> {
         self.runtime.block_on(self.client_based_op_node.peers(true)).map(|p| p.peers.into_values().collect())
     }
 
     pub fn peers_based_op_geth(&self) -> Result<Vec<OpGethPeer>, ClientError> {
         self.runtime.block_on(api::OpGethAdminApiClient::peers(&self.client_based_op_geth))
+    }
+
+    pub fn peers_main_op_geth(&self) -> Result<Vec<OpGethPeer>, ClientError> {
+        self.runtime.block_on(api::OpGethAdminApiClient::peers(&self.client_portal))
     }
 }
 
@@ -204,6 +213,17 @@ impl Overseer {
 
     pub fn update(&mut self, consumers: &mut OverseerConnections, slot_time: bool) {
         self.data.update(consumers, slot_time);
+    }
+
+    fn maybe_set_up_peers(&mut self, consumers: &mut OverseerConnections) {
+        if let Ok(peers) = consumers.peers_based_op_node() {
+            
+        }
+        if let Ok(peers) = consumers.peers_based_op_geth() {
+            
+        }
+
+        
     }
 
     pub fn render(&mut self, frame: &mut Frame) {

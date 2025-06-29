@@ -10,7 +10,7 @@ use bop_common::{
     },
     signing::ECDSASigner,
     telemetry::{Telemetry, frag::Frag, order::Tx, system::SystemNotification},
-    time::{Duration, TimingMessage},
+    time::{Duration, Instant, TimingMessage},
     typedefs::HashMap,
 };
 use frag::FragData;
@@ -44,13 +44,21 @@ pub struct PendingTransaction {
     nonce: u64,
     retries: usize,
     from_address: Address,
-    tx_hash: Option<B256>,
+    tx_hash: B256,
+    last_action: Instant,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum SpamMsgResponse {
+    RawTx(B256),
+    Receipt(Option<OpTransactionReceipt>),
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TxSpammer {
     // transfers sent for which we're waiting for receipt replies
-    pending_transfers: HashMap<CallRef, PendingTransaction>,
+    in_flight: HashMap<CallRef, PendingTransaction>,
     pending_retries: VecDeque<PendingTransaction>,
     max_retries: usize,
     uri_based_op_geth: Uri,
@@ -125,19 +133,23 @@ impl TxSpammer {
                 Some(nonce),
             ) {
                 let sent_timestamp = Nanos::now();
-                self.pending_transfers.insert(callref, PendingTransaction {
-                    sent_timestamp,
-                    retries: 0,
-                    from_address: signer.address,
-                    tx_hash: Some(hash),
-                    nonce,
-                });
+                self.in_flight.insert(
+                    callref,
+                    PendingTransaction {
+                        sent_timestamp,
+                        last_action: Instant::now(),
+                        retries: 0,
+                        from_address: signer.address,
+                        tx_hash: hash,
+                        nonce,
+                    },
+                );
 
                 return Some(SpammedTx {
                     wallet: signer.address,
                     sent_timestamp,
                     nonce,
-                    hash: Some(hash),
+                    hash,
                     block: None,
                     receipt_timestamp: None,
                 });
@@ -158,10 +170,10 @@ impl TxSpammer {
         }
         if pending.retries < self.max_retries {
             pending.retries += 1;
+            pending.last_action = Instant::now();
             self.pending_retries.push_back(pending);
         } else {
             tracing::debug!("{pending:?} failed after 5 reqs, keep retrying");
-            pending.tx_hash = None;
             pending.retries = 0;
             self.pending_retries.push_back(pending);
         }
@@ -172,7 +184,7 @@ impl TxSpammer {
             "id": 1,
             "jsonrpc": "2.0",
             "method": "eth_getTransactionReceipt",
-            "params": [pending.tx_hash.unwrap()]
+            "params": [pending.tx_hash]
         }))
         .unwrap();
         let Ok(req) = Request::builder()
@@ -191,11 +203,11 @@ impl TxSpammer {
             self.maybe_resend_later(pending);
             return;
         };
-        self.pending_transfers.insert(callref, pending);
+        self.in_flight.insert(callref, pending);
     }
 
     fn has_callref(&self, callref: &CallRef) -> bool {
-        self.pending_transfers.contains_key(callref)
+        self.in_flight.contains_key(callref)
     }
 
     fn is_status_ok(&mut self, resp: Response, body: &[u8], pending: PendingTransaction) -> Option<PendingTransaction> {
@@ -218,14 +230,15 @@ impl TxSpammer {
         f: impl FnOnce(SpammedTx),
     ) {
         let Ok((callref, res, body)) = resp.inspect_err(|e| {
-            if let Some(pending) = self.pending_transfers.remove(e.callref()) {
+            if let Some(mut pending) = self.in_flight.remove(e.callref()) {
+                pending.last_action = Instant::now();
                 self.maybe_resend_later(pending);
             }
         }) else {
             return;
         };
 
-        let Some(pending) = self.pending_transfers.remove(&callref) else {
+        let Some(pending) = self.in_flight.remove(&callref) else {
             tracing::warn!("got transaction response for a callref I don't know about");
             return;
         };
@@ -233,22 +246,16 @@ impl TxSpammer {
             return;
         };
 
-        match &pending.tx_hash {
-            Some(_hash) => {
-                let Some(receipt) = serde_json::from_slice::<RpcResponse<Option<OpTransactionReceipt>>>(&body).ok()
-                else {
-                    tracing::debug!("issue parsing receipt for {pending:?}: {}", String::from_utf8(body).unwrap());
-                    self.maybe_resend_later(pending);
-                    return;
-                };
-                let Some(receipt) = receipt.result.flatten() else {
-                    tracing::debug!("issue with receipt for {pending:?}: {}", String::from_utf8(body).unwrap());
-
-                    self.maybe_resend_later(pending);
-                    return;
-                };
+        let Some(resp) = serde_json::from_slice::<RpcResponse<SpamMsgResponse>>(&body).ok().and_then(|res| res.result)
+        else {
+            tracing::debug!("issue parsing receipt for {pending:?}: {}", String::from_utf8(body).unwrap());
+            self.maybe_resend_later(pending);
+            return;
+        };
+        match resp {
+            SpamMsgResponse::RawTx(tx) => self.send_receipt_request(walkie_talkie, pending),
+            SpamMsgResponse::Receipt(Some(receipt)) => {
                 self.last_successful_nonce = self.last_successful_nonce.max(pending.nonce);
-
                 f(SpammedTx::new(
                     pending.sent_timestamp,
                     pending.from_address,
@@ -258,29 +265,16 @@ impl TxSpammer {
                     Some(Nanos::now()),
                 ));
             }
-            None => {
-                let Some(hash) = serde_json::from_slice::<RpcResponse<B256>>(&body)
-                    .inspect_err(|e| {
-                        tracing::debug!(
-                            "couldn't parse eth_sendRawTransaction response from {}: {e}",
-                            std::str::from_utf8(&body).unwrap_or_default()
-                        );
-                    })
-                    .ok()
-                    .and_then(|t| t.result)
-                else {
-                    tracing::debug!(
-                        "something went wrong with eth_sendRawTransaction response for {pending:?}: {}",
-                        std::str::from_utf8(&body).unwrap_or_default()
-                    );
-                    self.maybe_resend_later(pending);
-                    return;
-                };
-                pending.tx_hash = Some(hash);
-                self.last_successful_nonce = self.last_successful_nonce.max(pending.nonce);
-                self.send_receipt_request(walkie_talkie, pending);
+            SpamMsgResponse::Receipt(None) => {
+                self.maybe_resend_later(pending);
             }
         }
+        let Some(receipt) = receipt.result.flatten() else {
+            tracing::debug!("issue with receipt for {pending:?}: {}", String::from_utf8(body).unwrap());
+
+            self.maybe_resend_later(pending);
+            return;
+        };
     }
 
     pub fn maybe_spam_more_txs(
@@ -303,10 +297,14 @@ impl TxSpammer {
             return nonce;
         }
         while let Some(to_resend) = self.pending_retries.pop_front() {
-            if to_resend.tx_hash.is_none() {
+            let should_break = to_resend.last_action.elapsed() < Duration::from_millis(40);
+            if to_resend.retries == 0 {
                 self.send_transfer_to_self(walkie_talkie, signer, to_resend.nonce);
             } else {
                 self.send_receipt_request(walkie_talkie, to_resend)
+            }
+            if should_break {
+                break;
             }
         }
 
