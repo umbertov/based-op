@@ -236,11 +236,8 @@ impl EngineApiServer for NodeGethPairInner {
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<OpPayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
-
-        warn!("Forkchoice updated v3. {:?}", self.active.load(Ordering::Relaxed));
-
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
+        if self.active.read().clone() {
+            return self.portal.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
         } else {
             match self.op_geth_engine_client.fork_choice_updated_v3(fork_choice_state, payload_attributes).await {
                 Ok(payload) => Ok(payload),
@@ -257,11 +254,8 @@ impl EngineApiServer for NodeGethPairInner {
         parent_beacon_block_root: B256,
         requests: RequestsOrHash,
     ) -> RpcResult<PayloadStatus> {
-
-        warn!("New payload v4. {:?}", self.active.load(Ordering::Relaxed));
-
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await;
+        if self.active.read().clone() {
+            return self.portal.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await;
         } else {
             match self.op_geth_engine_client.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await {
                 Ok(payload) => Ok(payload),
@@ -277,11 +271,8 @@ impl EngineApiServer for NodeGethPairInner {
         versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
     ) -> RpcResult<PayloadStatus> {
-
-        warn!("New payload v3. {:?}", self.active.load(Ordering::Relaxed));
-
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
+        if self.active.read().clone() {
+            return self.portal.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
         } else {
             match self.op_geth_engine_client.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await {
                 Ok(payload) => Ok(payload),
@@ -292,11 +283,8 @@ impl EngineApiServer for NodeGethPairInner {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn get_payload_v4(&self, payload_id: PayloadId) -> RpcResult<OpExecutionPayloadEnvelopeV4> {
-
-        warn!("Get payload v4. {:?}", self.active.load(Ordering::Relaxed));
-
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.get_payload_v4(payload_id).await;
+        if self.active.read().clone() {
+            return self.portal.get_payload_v4(payload_id).await;
         } else {
             match self.op_geth_engine_client.get_payload_v4(payload_id).await {
                 Ok(payload) => Ok(payload),
