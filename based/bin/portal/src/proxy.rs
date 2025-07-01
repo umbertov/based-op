@@ -2,8 +2,7 @@ use std::{
     fmt,
     net::SocketAddr,
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering}, Arc
     },
 };
 
@@ -54,17 +53,30 @@ pub struct NodeGethPairArgs {
 }
 
 #[derive(Clone)]
-pub struct NodeGethPair {
+pub struct NodeGethPairInner {
     pub op_node_client: RpcClient,
     pub op_geth_client: RpcClient,
     pub op_geth_engine_client: AuthRpcClient,
     pub portal: PortalServer,
     pub head_hash: B256,
-    pub active: Arc<RwLock<bool>>,
+    pub active: Arc<AtomicBool>,
     pub ingress_addr: SocketAddr,
 }
 
+pub struct NodeGethPair {
+    pub inner: Arc<NodeGethPairInner>,
+}
+
 impl NodeGethPair {
+    pub async fn new(args: NodeGethPairArgs) -> Self {
+        let inner = NodeGethPairInner::new(args).await.expect("Failed to create NodeGethPairInner");
+        NodeGethPair {
+            inner: Arc::new(inner),
+        }
+    }
+}
+
+impl NodeGethPairInner {
     pub async fn new(args: NodeGethPairArgs) -> eyre::Result<Self> {
         let timeout = Duration::from_millis(args.timeout_ms);
         let op_node_client = create_client(args.op_node_url.clone(), timeout)?;
@@ -75,13 +87,13 @@ impl NodeGethPair {
             timeout,
         )?;
 
-        Ok(NodeGethPair {
+        Ok(NodeGethPairInner {
             op_node_client,
             op_geth_client,
             op_geth_engine_client,
             portal: args.portal,
             head_hash: B256::ZERO,
-            active: Arc::new(RwLock::new(false)),
+            active: Arc::new(AtomicBool::new(false)),
             ingress_addr: args.ingress_addr,
         })
     }
@@ -91,7 +103,7 @@ impl NodeGethPair {
         let op_geth_client = self.op_geth_client.clone();
         let op_geth_engine_client = self.op_geth_engine_client.clone();
         let op_node_client = self.op_node_client.clone();
-        let registry_client = self.portal.registry_client.clone();
+        let registry_client = self.portal.inner.registry_client.clone();
         let ingress_addr = self.ingress_addr;
 
         let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
@@ -121,16 +133,20 @@ impl NodeGethPair {
         let server_handle = server.start(module);
         Ok(server_handle)
     }
+
+    pub fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
+    }
 }
 
 /// This is a temporary API to broacast transactions to both gateway and fallback. In practice this should not be
 /// receiving user facing calls so we need to find another way to do this
 #[async_trait]
-impl EthApiServer for NodeGethPair {
+impl EthApiServer for NodeGethPairInner {
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256> {
-        if self.active.read().clone() {
-            return self.portal.send_raw_transaction(bytes.clone()).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.send_raw_transaction(bytes.clone()).await;
         } else {
             match self.op_geth_client.send_raw_transaction(bytes.clone()).await {
                 Ok(payload) => Ok(payload),
@@ -141,8 +157,8 @@ impl EthApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
     async fn transaction_receipt(&self, hash: B256) -> RpcResult<Option<OpTransactionReceipt>> {
-        if !self.active.read().clone() {
-            return self.portal.transaction_receipt(hash).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.transaction_receipt(hash).await;
         } else {
             match self.op_geth_client.transaction_receipt(hash).await {
                 Ok(payload) => Ok(payload),
@@ -153,8 +169,8 @@ impl EthApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
     async fn block_by_number(&self, number: BlockNumberOrTag, full: bool) -> RpcResult<Option<OpRpcBlock>> {
-        if !self.active.read().clone() {
-            return self.portal.block_by_number(number, full).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.block_by_number(number, full).await;
         } else {
             match self.op_geth_client.block_by_number(number, full).await {
                 Ok(payload) => Ok(payload),
@@ -165,8 +181,8 @@ impl EthApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
     async fn block_by_hash(&self, hash: B256, full: bool) -> RpcResult<Option<OpRpcBlock>> {
-        if !self.active.read().clone() {
-            return self.portal.block_by_hash(hash, full).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.block_by_hash(hash, full).await;
         } else {
             match self.op_geth_client.block_by_hash(hash, full).await {
                 Ok(payload) => Ok(payload),
@@ -177,8 +193,8 @@ impl EthApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
     async fn block_number(&self) -> RpcResult<U256> {
-        if !self.active.read().clone() {
-            return self.portal.block_number().await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.block_number().await;
         } else {
             match self.op_geth_client.block_number().await {
                 Ok(payload) => Ok(payload),
@@ -189,8 +205,8 @@ impl EthApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
     async fn transaction_count(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
-        if !self.active.read().clone() {
-            return self.portal.transaction_count(address, block_number).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.transaction_count(address, block_number).await;
         } else {
             match self.op_geth_client.transaction_count(address, block_number).await {
                 Ok(payload) => Ok(payload),
@@ -201,8 +217,8 @@ impl EthApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
-        if !self.active.read().clone() {
-            return self.portal.balance(address, block_number).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.balance(address, block_number).await;
         } else {
             match self.op_geth_client.balance(address, block_number).await {
                 Ok(payload) => Ok(payload),
@@ -213,15 +229,15 @@ impl EthApiServer for NodeGethPair {
 }
 
 #[async_trait]
-impl EngineApiServer for NodeGethPair {
+impl EngineApiServer for NodeGethPairInner {
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn fork_choice_updated_v3(
         &self,
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<OpPayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
-        if self.active.read().clone() {
-            return self.portal.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
         } else {
             match self.op_geth_engine_client.fork_choice_updated_v3(fork_choice_state, payload_attributes).await {
                 Ok(payload) => Ok(payload),
@@ -238,8 +254,8 @@ impl EngineApiServer for NodeGethPair {
         parent_beacon_block_root: B256,
         requests: RequestsOrHash,
     ) -> RpcResult<PayloadStatus> {
-        if self.active.read().clone() {
-            return self.portal.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await;
         } else {
             match self.op_geth_engine_client.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await {
                 Ok(payload) => Ok(payload),
@@ -255,8 +271,8 @@ impl EngineApiServer for NodeGethPair {
         versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
     ) -> RpcResult<PayloadStatus> {
-        if self.active.read().clone() {
-            return self.portal.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
         } else {
             match self.op_geth_engine_client.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await {
                 Ok(payload) => Ok(payload),
@@ -267,8 +283,8 @@ impl EngineApiServer for NodeGethPair {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn get_payload_v4(&self, payload_id: PayloadId) -> RpcResult<OpExecutionPayloadEnvelopeV4> {
-        if self.active.read().clone() {
-            return self.portal.get_payload_v4(payload_id).await;
+        if self.active.load(Ordering::Relaxed) {
+            return self.portal.inner.get_payload_v4(payload_id).await;
         } else {
             match self.op_geth_engine_client.get_payload_v4(payload_id).await {
                 Ok(payload) => Ok(payload),
@@ -278,7 +294,7 @@ impl EngineApiServer for NodeGethPair {
     }
 }
 
-impl NodeGethPair {
+impl NodeGethPairInner {
     pub async fn get_current_unsafe_l2(&self) -> B256 {
         match self.op_node_client.sync_status().await {
             Ok(status) => status.unsafe_l2.hash,
@@ -293,7 +309,7 @@ impl NodeGethPair {
         }
     }
 
-    pub async fn pair_node_p2p(&self, other: &NodeGethPair) -> eyre::Result<()> {
+    pub async fn pair_node_p2p(&self, other: &NodeGethPairInner) -> eyre::Result<()> {
         let multi_address_self = self.op_node_client.peer_info().await?.addresses[0].clone();
         let multi_address_other = other.op_node_client.peer_info().await?.addresses[0].clone();
         self.op_node_client.connect_peer(multi_address_other.clone()).await?;

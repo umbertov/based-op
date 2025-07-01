@@ -38,7 +38,7 @@ use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{Instrument, Level, debug, error, info, trace};
 
-use crate::{cli::PortalArgs, middleware::ProxyService, proxy::NodeGethPair};
+use crate::{cli::PortalArgs, middleware::ProxyService, proxy::NodeGethPairInner};
 use jsonrpsee::server::HttpBody;
 
 
@@ -80,7 +80,7 @@ impl Gateway {
 }
 
 #[derive(Clone)]
-pub struct PortalServer {
+pub struct PortalServerInner {
     pub fallback_eth_client: RpcClient,
     pub fallback_client: AuthRpcClient,
     pub op_node_client: RpcClient,
@@ -95,7 +95,69 @@ pub struct PortalServer {
     pub args: Arc<PortalArgs>,
 }
 
+#[derive(Clone)]
+pub struct PortalServer {
+    pub inner: Arc<PortalServerInner>,
+}
+
 impl PortalServer {
+    pub async fn new(args: PortalArgs) -> eyre::Result<Self> {
+        let inner = PortalServerInner::new(args).await?;
+        Ok(Self { inner: Arc::new(inner) })
+    }
+}
+
+impl PortalServer {
+    pub async fn run(&self, addr: SocketAddr) -> eyre::Result<(ServerHandle)> {
+        let fallback_client = self.inner.fallback_client.clone();
+        let fallback_eth_client = self.inner.fallback_eth_client.clone();
+        let op_node_client = self.inner.op_node_client.clone();
+        let registry_client = self.inner.registry_client.clone();
+
+        let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
+            ProxyService::new(
+                PORTAL_CAPABILITIES,
+                s,
+                fallback_eth_client.clone(),
+                fallback_client.clone(),
+                op_node_client.clone(),
+                registry_client.clone(),
+            )
+        });
+
+        // temp: remove when factoring out the portal
+        let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+        let cors_middleware = ServiceBuilder::new().layer(cors);
+        let server = ServerBuilder::default()
+            .max_request_body_size(u32::MAX)
+            .max_response_body_size(u32::MAX)
+            .set_rpc_middleware(rpc_middleware)
+            .set_http_middleware(cors_middleware)
+            .build(addr)
+            .await?;
+
+        let mut module = EngineApiServer::into_rpc((*self.inner).clone());
+        module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
+        module.merge(PortalApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
+
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            loop {
+                match inner.refresh_gateway_list().await {
+                    Ok(_) => {}
+                    Err(err) => {
+                        error!(%err, "Failed to fetch registered gateways");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(1).into()).await;
+            }
+        });
+        let server_handle = server.start(module);
+        Ok(server_handle)
+    }
+}
+
+impl PortalServerInner {
     pub async fn new(args: PortalArgs) -> eyre::Result<Self> {
         let fallback_jwt = args.fallback_jwt();
 
@@ -152,53 +214,6 @@ impl PortalServer {
         };
 
         Ok(temp)
-    }
-
-    pub async fn run(self, addr: SocketAddr) -> eyre::Result<(ServerHandle)> {
-        let fallback_client = self.fallback_client.clone();
-        let fallback_eth_client = self.fallback_eth_client.clone();
-        let op_node_client = self.op_node_client.clone();
-        let registry_client = self.registry_client.clone();
-
-        let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
-            ProxyService::new(
-                PORTAL_CAPABILITIES,
-                s,
-                fallback_eth_client.clone(),
-                fallback_client.clone(),
-                op_node_client.clone(),
-                registry_client.clone(),
-            )
-        });
-
-        // temp: remove when factoring out the portal
-        let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
-        let cors_middleware = ServiceBuilder::new().layer(cors);
-        let server = ServerBuilder::default()
-            .max_request_body_size(u32::MAX)
-            .max_response_body_size(u32::MAX)
-            .set_rpc_middleware(rpc_middleware)
-            .set_http_middleware(cors_middleware)
-            .build(addr)
-            .await?;
-
-        let mut module = EngineApiServer::into_rpc(self.clone());
-        module.merge(EthApiServer::into_rpc(self.clone())).expect("failed to merge modules");
-        module.merge(PortalApiServer::into_rpc(self.clone())).expect("failed to merge modules");
-
-        tokio::spawn(async move {
-            loop {
-                match self.refresh_gateway_list().await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        error!(%err, "Failed to fetch registered gateways");
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(1).into()).await;
-            }
-        });
-        let server_handle = server.start(module);
-        Ok(server_handle)
     }
 
     fn gateways(&self) -> Vec<Gateway> {
@@ -341,7 +356,7 @@ impl PortalServer {
 /// This is a temporary API to broacast transactions to both gateway and fallback. In practice this should not be
 /// receiving user facing calls so we need to find another way to do this
 #[async_trait]
-impl EthApiServer for PortalServer {
+impl EthApiServer for PortalServerInner {
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256> {
         // send to gateways and fallback
@@ -517,7 +532,7 @@ impl EthApiServer for PortalServer {
 }
 
 #[async_trait]
-impl EngineApiServer for PortalServer {
+impl EngineApiServer for PortalServerInner {
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn fork_choice_updated_v3(
         &self,
@@ -748,7 +763,7 @@ impl EngineApiServer for PortalServer {
 }
 
 #[async_trait]
-impl PortalApiServer for PortalServer {
+impl PortalApiServer for PortalServerInner {
     /// The network id of the l2
     async fn l2_chain_id(&self) -> RpcResult<u64> {
         Ok(self.op_node_client.rollup_config().await.map(|config| config.l2_chain_id)?)
@@ -791,7 +806,7 @@ impl PortalApiServer for PortalServer {
 
 // TODO: Implement this properly
 #[async_trait]
-impl RegistryApiServer for PortalServer {
+impl RegistryApiServer for PortalServerInner {
     async fn get_future_gateway(&self, n_blocks_into_future: u64) -> RpcResult<(u64, Url, Address, B256)> {
         match self.registry_client.get_future_gateway(n_blocks_into_future).await {
             Ok(gateway) => Ok(gateway),
