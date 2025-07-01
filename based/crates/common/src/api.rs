@@ -34,11 +34,11 @@ pub const PORTAL_CAPABILITIES: &[&str] = &[
 ];
 
 pub const PROXY_CAPABILITIES: &[&str] = &[
-    // "engine_forkchoiceUpdatedV3",
-    // "engine_getPayloadV3",
-    // "engine_getPayloadV4",
-    // "engine_newPayloadV3",
-    // "engine_newPayloadV4",
+    "engine_forkchoiceUpdatedV3",
+    "engine_getPayloadV3",
+    "engine_getPayloadV4",
+    "engine_newPayloadV3",
+    "engine_newPayloadV4",
     // "eth_sendRawTransaction",
     // "eth_getTransactionReceipt",
     // "eth_getBlockByNumber",
@@ -217,6 +217,21 @@ pub trait OpNodeApi {
     /// The syncstatus of the op-node
     #[method(name = "syncStatus")]
     async fn sync_status(&self) -> RpcResult<SyncStatus>;
+}
+
+#[rpc(client, server, namespace = "admin")]
+pub trait OpNodeAdminApi {
+    /// start sequencer
+    #[method(name = "startSequencer")]
+    async fn start_sequencer(&self, head: B256) -> RpcResult<()>;
+
+    /// stop sequencer
+    #[method(name = "stopSequencer")]
+    async fn stop_sequencer(&self) -> RpcResult<()>;
+
+    /// stop sequencer
+    #[method(name = "sequencerActive")]
+    async fn sequencer_active(&self) -> RpcResult<bool>;
 }
 
 #[rpc(client, server, namespace = "opp2p")]

@@ -34,7 +34,7 @@ use reth_rpc_layer::{AuthClientLayer, AuthClientService, JwtSecret};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{Instrument, Level, debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn, Instrument, Level};
 
 use crate::{cli::PortalArgs, middleware::ProxyService, server::PortalServer};
 use jsonrpsee::server::HttpBody;
@@ -236,6 +236,9 @@ impl EngineApiServer for NodeGethPairInner {
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<OpPayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
+
+        warn!("Forkchoice updated v3. {:?}", self.active.load(Ordering::Relaxed));
+
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
         } else {
@@ -254,6 +257,9 @@ impl EngineApiServer for NodeGethPairInner {
         parent_beacon_block_root: B256,
         requests: RequestsOrHash,
     ) -> RpcResult<PayloadStatus> {
+
+        warn!("New payload v4. {:?}", self.active.load(Ordering::Relaxed));
+
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.new_payload_v4(payload, versioned_hashes, parent_beacon_block_root, requests).await;
         } else {
@@ -271,6 +277,9 @@ impl EngineApiServer for NodeGethPairInner {
         versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
     ) -> RpcResult<PayloadStatus> {
+
+        warn!("New payload v3. {:?}", self.active.load(Ordering::Relaxed));
+
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
         } else {
@@ -283,6 +292,9 @@ impl EngineApiServer for NodeGethPairInner {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn get_payload_v4(&self, payload_id: PayloadId) -> RpcResult<OpExecutionPayloadEnvelopeV4> {
+
+        warn!("Get payload v4. {:?}", self.active.load(Ordering::Relaxed));
+
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.get_payload_v4(payload_id).await;
         } else {

@@ -210,7 +210,7 @@ op_geth_url2 = "http://localhost:18545"
 # monitor_sync_status()
 # p2p_setup()
 # # print(stop_sequencer(op_node_url2))
-# monitor_head()
+monitor_head()
 
 while True:
     match(input(">")):
