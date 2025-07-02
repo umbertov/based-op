@@ -77,6 +77,7 @@ impl NodeGethPair {
 
     pub async fn activate(&self) {
         self.inner.active.store(true, Ordering::Relaxed);
+        self.inner.portal.inner.set_current_proxy(self.clone()).await;
     }
 
     pub async fn deactivate(&self) {
@@ -160,6 +161,11 @@ impl NodeGethPair {
                 Err(eyre::eyre!("Failed to stop sequencer: {}", err))
             }
         }
+    }
+
+    pub async fn is_alive(&self) -> bool {
+        self.inner.op_node_client.sync_status().await.is_ok() &&
+        self.inner.op_geth_engine_client.node_info().await.is_ok()
     }
 }
 
