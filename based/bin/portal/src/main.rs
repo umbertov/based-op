@@ -12,6 +12,8 @@ use reth_rpc_layer::JwtSecret;
 use server::{PortalServer, PortalServerInner};
 use tracing::{error, info};
 
+use crate::proxy::ProxyManager;
+
 mod cli;
 mod middleware;
 mod proxy;
@@ -54,75 +56,85 @@ async fn main() -> eyre::Result<()> {
     let t2 = proxy1.run().await?;
     let t3 = proxy2.run().await?;
 
-    let p1 = proxy1.clone();
-    let p2 = proxy2.clone();
+    let mut manager = ProxyManager::new(
+        portal_server.clone()
+    );
+    manager.add_pair(proxy1.clone()).await;
+    manager.add_pair(proxy2.clone()).await;
+
     let t4 = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            info!("");
-            info!("Current Safe L2 state:");
-            info!("Node1: {}", p1.get_current_safe_l2().await);
-            info!("Node2: {}", p2.get_current_safe_l2().await);
-            info!("Current Unsafe L2 state:");
-            info!("Node1: {}", p1.get_current_unsafe_l2().await);
-            info!("Node2: {}", p2.get_current_unsafe_l2().await);
-        }
+        manager.run().await;
     });
 
     let p1 = proxy1.clone();
     let p2 = proxy2.clone();
     let t5 = tokio::spawn(async move {
         loop {
-            p1.pair_node_p2p(&p2).await.unwrap_or({
-                error!("Failed to pair nodes");
-            });
-            tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            info!("");
+            info!("Current Safe L2 state:");
+            info!("Node1: {}", p1.get_current_safe_l2().await);
+            info!("Node2: {}", p2.get_current_safe_l2().await);
+            info!("Current Unsafe L2 state:");
+            info!("Node1: {}, Seq: {}", p1.get_current_unsafe_l2().await, p1.sequencer_active().await);
+            info!("Node2: {}, Seq: {}", p2.get_current_unsafe_l2().await, p2.sequencer_active().await);
         }
     });
 
-    let p1 = proxy1.clone();
-    let p2 = proxy2.clone();
-    let t6 = tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        let _ = p1.stop_sequencer().await;
-        let _ = p2.stop_sequencer().await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        let _ = p1.start_sequencer(p1.get_current_unsafe_l2().await).await;
-        loop {
-            let p1_head = p1.get_current_unsafe_l2().await;
-            let p2_head = p2.get_current_unsafe_l2().await;
-            if p1_head == p2_head {
-                break;
-            } else {
-                info!("Waiting for proxies to sync: Node1: {}, Node2: {}", p1_head, p2_head);
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-        }
-        let _ = p1.start_sequencer(p2.get_current_unsafe_l2().await).await;
-        p1.activate().await;
+    // let p1 = proxy1.clone();
+    // let p2 = proxy2.clone();
+    // let t5 = tokio::spawn(async move {
+    //     loop {
+    //         p1.pair_node_p2p(&p2).await.unwrap_or({
+    //             error!("Failed to pair nodes");
+    //         });
+    //         tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    //     }
+    // });
 
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            while !p1.get_current_unsafe_l2().await.is_zero() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                let _ = p2.stop_sequencer().await;
-            }
-            let _ = p2.start_sequencer(p2.get_current_unsafe_l2().await).await;
-            p1.deactivate().await;
-            p2.activate().await;
+    // let p1 = proxy1.clone();
+    // let p2 = proxy2.clone();
+    // let t6 = tokio::spawn(async move {
+    //     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //     let _ = p1.stop_sequencer().await;
+    //     let _ = p2.stop_sequencer().await;
+    //     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //     let _ = p1.start_sequencer(p1.get_current_unsafe_l2().await).await;
+    //     loop {
+    //         let p1_head = p1.get_current_unsafe_l2().await;
+    //         let p2_head = p2.get_current_unsafe_l2().await;
+    //         if p1_head == p2_head {
+    //             break;
+    //         } else {
+    //             info!("Waiting for proxies to sync: Node1: {}, Node2: {}", p1_head, p2_head);
+    //             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //         }
+    //     }
+    //     let _ = p1.start_sequencer(p2.get_current_unsafe_l2().await).await;
+    //     p1.activate().await;
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            while !p2.get_current_unsafe_l2().await.is_zero() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                let _ = p1.stop_sequencer().await;
-            }
-            let _ = p1.start_sequencer(p1.get_current_unsafe_l2().await).await;
-            p2.deactivate().await;
-            p1.activate().await;
-        }
-    });
+    //     loop {
+    //         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //         while !p1.get_current_unsafe_l2().await.is_zero() {
+    //             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //             let _ = p2.stop_sequencer().await;
+    //         }
+    //         let _ = p2.start_sequencer(p2.get_current_unsafe_l2().await).await;
+    //         p1.deactivate().await;
+    //         p2.activate().await;
 
-    let _ = tokio::join!(t1.stopped(), t2.stopped(), t3.stopped(), t4, t5, t6,);
+    //         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //         while !p2.get_current_unsafe_l2().await.is_zero() {
+    //             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    //             let _ = p1.stop_sequencer().await;
+    //         }
+    //         let _ = p1.start_sequencer(p1.get_current_unsafe_l2().await).await;
+    //         p2.deactivate().await;
+    //         p1.activate().await;
+    //     }
+    // });
+
+    let _ = tokio::join!(t1.stopped(), t2.stopped(), t3.stopped(), t4, t5);
 
     Ok(())
 }

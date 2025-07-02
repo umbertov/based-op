@@ -13,6 +13,7 @@ use alloy_rpc_types::{
     BlockId, BlockNumberOrTag,
     engine::{ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus, payload},
 };
+use axum::error_handling::future;
 use bop_common::{
     api::{
         ControlApiClient, EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient,
@@ -61,6 +62,7 @@ pub struct NodeGethPairInner {
     pub portal: PortalServer,
     pub head_hash: B256,
     pub active: Arc<AtomicBool>,
+    pub alive: Arc<AtomicBool>,
     pub ingress_addr: SocketAddr,
 }
 
@@ -146,26 +148,42 @@ impl NodeGethPair {
     pub async fn start_sequencer(&self, head: B256) -> eyre::Result<()> {
         match self.inner.op_node_client.start_sequencer(head).await {
             Ok(_) => Ok(()),
-            Err(err) => {
-                error!(%err, "Failed to start sequencer");
-                Err(eyre::eyre!("Failed to start sequencer: {}", err))
-            }
+            Err(err) => Err(eyre::eyre!("Failed to start sequencer: {}", err)),
         }
     }
 
     pub async fn stop_sequencer(&self) -> eyre::Result<()> {
         match self.inner.op_node_client.stop_sequencer().await {
             Ok(_) => Ok(()),
+            Err(err) => Err(eyre::eyre!("Failed to stop sequencer: {}", err)),
+        }
+    }
+
+    pub async fn sequencer_active(&self) -> bool {
+        match self.inner.op_node_client.sequencer_active().await {
+            Ok(active) => active,
             Err(err) => {
-                error!(%err, "Failed to stop sequencer");
-                Err(eyre::eyre!("Failed to stop sequencer: {}", err))
+                warn!("Failed to check sequencer status: {}", err);
+                false
             }
         }
     }
 
     pub async fn is_alive(&self) -> bool {
         self.inner.op_node_client.sync_status().await.is_ok() &&
-        self.inner.op_geth_engine_client.node_info().await.is_ok()
+            self.inner.op_geth_engine_client.node_info().await.is_ok()
+    }
+
+    pub async fn run_health_monitor(&self) -> eyre::Result<()> {
+        loop {
+            if !self.get_current_unsafe_l2().await.is_zero(){
+                self.inner.alive.store(true, Ordering::Relaxed);
+            } else {
+                self.inner.alive.store(false, Ordering::Relaxed);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        Ok(())
     }
 }
 
@@ -183,6 +201,7 @@ impl NodeGethPairInner {
             portal: args.portal,
             head_hash: B256::ZERO,
             active: Arc::new(AtomicBool::new(false)),
+            alive: Arc::new(AtomicBool::new(false)),
             ingress_addr: args.ingress_addr,
         })
     }
@@ -285,8 +304,6 @@ impl EngineApiServer for NodeGethPairInner {
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<OpPayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
-        warn!("Forkchoice updated v3. {:?}", self.active.load(Ordering::Relaxed));
-
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.fork_choice_updated_v3(fork_choice_state, payload_attributes).await;
         } else {
@@ -305,8 +322,6 @@ impl EngineApiServer for NodeGethPairInner {
         parent_beacon_block_root: B256,
         requests: RequestsOrHash,
     ) -> RpcResult<PayloadStatus> {
-        warn!("New payload v4. {:?}", self.active.load(Ordering::Relaxed));
-
         if self.active.load(Ordering::Relaxed) {
             return self
                 .portal
@@ -332,8 +347,6 @@ impl EngineApiServer for NodeGethPairInner {
         versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
     ) -> RpcResult<PayloadStatus> {
-        warn!("New payload v3. {:?}", self.active.load(Ordering::Relaxed));
-
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.new_payload_v3(payload, versioned_hashes, parent_beacon_block_root).await;
         } else {
@@ -346,8 +359,6 @@ impl EngineApiServer for NodeGethPairInner {
 
     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
     async fn get_payload_v4(&self, payload_id: PayloadId) -> RpcResult<OpExecutionPayloadEnvelopeV4> {
-        warn!("Get payload v4. {:?}", self.active.load(Ordering::Relaxed));
-
         if self.active.load(Ordering::Relaxed) {
             return self.portal.inner.get_payload_v4(payload_id).await;
         } else {
@@ -380,4 +391,110 @@ fn create_auth_client(url: Url, jwt: JwtSecret, timeout: Duration) -> eyre::Resu
         .build(url)?;
 
     Ok(client)
+}
+
+
+pub struct ProxyManager {
+    pub pairs: Vec<NodeGethPair>,
+    pub active_pair: Arc<AtomicU64>,
+    pub portal: PortalServer,
+}
+
+impl ProxyManager {
+    pub fn new(portal: PortalServer) -> Self {
+        ProxyManager {
+            pairs: Vec::new(),
+            active_pair: Arc::new(AtomicU64::new(0)),
+            portal,
+        }
+    }
+
+    pub async fn add_pair(&mut self, pair: NodeGethPair) {
+        self.pairs.push(pair);
+    }
+
+    pub async fn spawn_health_monitor(&self) -> eyre::Result<()> {
+        for pair in &self.pairs {
+            let pair_clone = pair.clone();
+            tokio::spawn(async move {
+                pair_clone.run_health_monitor().await;
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn ensure_single_sequencer(&self) -> eyre::Result<()> {
+        let mut sequencer_count = 0;
+        for (idx, pair) in self.pairs.iter().enumerate() {
+            if pair.sequencer_active().await {
+                sequencer_count += 1;
+                if sequencer_count > 1 {
+                    pair.stop_sequencer().await?;
+                } else {
+                    self.active_pair.store(idx as u64, Ordering::Relaxed);
+                }
+            }
+        }
+        if sequencer_count == 0 {
+            let first_pair = self.pairs.first().ok_or_else(|| eyre::eyre!("No pairs available"))?;
+            first_pair.start_sequencer(first_pair.get_current_unsafe_l2().await).await?;
+            self.active_pair.store(0, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    pub async fn wait_all_initialized(&self) -> eyre::Result<()> {
+        let mut all_initialized = false;
+        while !all_initialized {
+            all_initialized = true;
+            for pair in &self.pairs {
+                if pair.get_current_unsafe_l2().await.is_zero() {
+                    all_initialized = false;
+                    break;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            info!("Waiting for all pairs to be initialized...");
+        }
+        info!("All pairs are initialized...");
+        Ok(())
+    }
+
+    pub async fn wait_head_sync(&self) -> eyre::Result<()> {
+        let mut all_head_sync = false;
+        let mut head = B256::ZERO;
+        while !all_head_sync {
+            all_head_sync = true;
+            head = B256::ZERO;
+            for pair in &self.pairs {
+                let current_pair_head = pair.get_current_unsafe_l2().await;
+                if head.is_zero() {
+                    head = current_pair_head;
+                } else if head != current_pair_head {
+                    all_head_sync = false;
+                    break;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            info!("Waiting for all pairs to sync to head: {}", hex::encode(head));
+        }
+        info!("All pairs are synced to head: {}", hex::encode(head));
+        Ok(())
+    }
+
+    pub async fn wait_ready(&self) -> eyre::Result<()> {
+        if self.pairs.is_empty() {
+            return Err(eyre::eyre!("No pairs available for head sync"));
+        }
+        self.wait_all_initialized().await?;
+        self.wait_head_sync().await?;
+        Ok(())
+    }
+
+    pub async fn run(&self) -> eyre::Result<()> {
+        self.spawn_health_monitor().await?;
+        self.ensure_single_sequencer().await?;
+        self.wait_ready().await?;
+        Ok(())
+    }
 }
