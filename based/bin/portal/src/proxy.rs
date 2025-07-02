@@ -423,7 +423,7 @@ impl ProxyManager {
         Ok(())
     }
 
-    pub async fn ensure_single_sequencer(&self) -> eyre::Result<()> {
+    pub async fn ensure_single_sequencer(&self, bridge_portal: bool) -> eyre::Result<()> {
         let mut sequencer_count = 0;
         for (idx, pair) in self.pairs.iter().enumerate() {
             if pair.sequencer_active().await {
@@ -439,6 +439,11 @@ impl ProxyManager {
             let first_pair = self.pairs.first().ok_or_else(|| eyre::eyre!("No pairs available"))?;
             first_pair.start_sequencer(first_pair.get_current_unsafe_l2().await).await?;
             self.active_pair.store(0, Ordering::Relaxed);
+        }
+        if bridge_portal {
+            self.pairs[self.active_pair.load(Ordering::Relaxed) as usize]
+                .activate()
+                .await;
         }
         Ok(())
     }
@@ -493,8 +498,10 @@ impl ProxyManager {
 
     pub async fn run(&self) -> eyre::Result<()> {
         self.spawn_health_monitor().await?;
-        self.ensure_single_sequencer().await?;
+        self.ensure_single_sequencer(false).await?;
         self.wait_ready().await?;
+        self.ensure_single_sequencer(true).await?;
+
         Ok(())
     }
 }
