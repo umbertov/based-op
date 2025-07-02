@@ -63,21 +63,17 @@ async fn main() -> eyre::Result<()> {
     manager.add_pair(proxy2.clone()).await;
 
     let t4 = tokio::spawn(async move {
-        manager.run().await;
+        let _ = manager.run().await;
     });
 
     let p1 = proxy1.clone();
     let p2 = proxy2.clone();
     let t5 = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            info!("");
-            info!("Current Safe L2 state:");
-            info!("Node1: {}", p1.get_current_safe_l2().await);
-            info!("Node2: {}", p2.get_current_safe_l2().await);
+            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
             info!("Current Unsafe L2 state:");
-            info!("Node1: {}, Seq: {}", p1.get_current_unsafe_l2().await, p1.sequencer_active().await);
-            info!("Node2: {}, Seq: {}", p2.get_current_unsafe_l2().await, p2.sequencer_active().await);
+            info!("Node1: {}, Seq: {}, Alive: {}", p1.get_current_unsafe_l2().await, p1.sequencer_active().await, p1.is_alive().await);
+            info!("Node2: {}, Seq: {}, Alive: {}", p2.get_current_unsafe_l2().await, p2.sequencer_active().await, p2.is_alive().await);
         }
     });
 

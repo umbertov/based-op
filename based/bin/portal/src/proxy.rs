@@ -62,7 +62,6 @@ pub struct NodeGethPairInner {
     pub portal: PortalServer,
     pub head_hash: B256,
     pub active: Arc<AtomicBool>,
-    pub alive: Arc<AtomicBool>,
     pub ingress_addr: SocketAddr,
 }
 
@@ -170,20 +169,7 @@ impl NodeGethPair {
     }
 
     pub async fn is_alive(&self) -> bool {
-        self.inner.op_node_client.sync_status().await.is_ok() &&
-            self.inner.op_geth_engine_client.node_info().await.is_ok()
-    }
-
-    pub async fn run_health_monitor(&self) -> eyre::Result<()> {
-        loop {
-            if !self.get_current_unsafe_l2().await.is_zero(){
-                self.inner.alive.store(true, Ordering::Relaxed);
-            } else {
-                self.inner.alive.store(false, Ordering::Relaxed);
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-        Ok(())
+        !self.get_current_unsafe_l2().await.is_zero()
     }
 }
 
@@ -201,7 +187,6 @@ impl NodeGethPairInner {
             portal: args.portal,
             head_hash: B256::ZERO,
             active: Arc::new(AtomicBool::new(false)),
-            alive: Arc::new(AtomicBool::new(false)),
             ingress_addr: args.ingress_addr,
         })
     }
@@ -413,38 +398,36 @@ impl ProxyManager {
         self.pairs.push(pair);
     }
 
-    pub async fn spawn_health_monitor(&self) -> eyre::Result<()> {
-        for pair in &self.pairs {
-            let pair_clone = pair.clone();
-            tokio::spawn(async move {
-                pair_clone.run_health_monitor().await;
-            });
-        }
-        Ok(())
-    }
-
     pub async fn ensure_single_sequencer(&self, bridge_portal: bool) -> eyre::Result<()> {
+        info!("Ensuring single sequencer across all pairs...");
         let mut sequencer_count = 0;
         for (idx, pair) in self.pairs.iter().enumerate() {
             if pair.sequencer_active().await {
                 sequencer_count += 1;
                 if sequencer_count > 1 {
-                    pair.stop_sequencer().await?;
+                    let _ = pair.stop_sequencer().await;
                 } else {
                     self.active_pair.store(idx as u64, Ordering::Relaxed);
                 }
             }
         }
         if sequencer_count == 0 {
-            let first_pair = self.pairs.first().ok_or_else(|| eyre::eyre!("No pairs available"))?;
-            first_pair.start_sequencer(first_pair.get_current_unsafe_l2().await).await?;
-            self.active_pair.store(0, Ordering::Relaxed);
+            for (i, pair) in self.pairs.iter().enumerate() {
+                if pair.is_alive().await {
+                    sequencer_count += 1;
+                    let _ = pair.start_sequencer(pair.get_current_unsafe_l2().await).await;
+                    self.active_pair.store(i as u64, Ordering::Relaxed);
+                    info!("Started sequencer on pair index: {}", i);
+                    break;
+                }
+            }
         }
         if bridge_portal {
             self.pairs[self.active_pair.load(Ordering::Relaxed) as usize]
                 .activate()
                 .await;
         }
+        info!("Single sequencer ensured, active pair index: {}", self.active_pair.load(Ordering::Relaxed));
         Ok(())
     }
 
@@ -492,15 +475,54 @@ impl ProxyManager {
             return Err(eyre::eyre!("No pairs available for head sync"));
         }
         self.wait_all_initialized().await?;
+        info!("All pairs are initialized, proceeding to head sync...");
+        self.pair_all_nodes().await?;
+        info!("All nodes are paired, proceeding to head sync...");
         self.wait_head_sync().await?;
+        info!("All nodes are synced to head, proceeding to ensure single sequencer...");
+        Ok(())
+    }
+
+    pub async fn pair_all_nodes(&self) -> eyre::Result<()> {
+        for (i, pair) in self.pairs.iter().enumerate() {
+            for (j, other_pair) in self.pairs.iter().enumerate() {
+                if i != j {
+                    let _ = pair.pair_node_p2p(other_pair).await;
+                    info!("Paired Node {} with Node {}", i, j);
+                }
+            }
+        }
         Ok(())
     }
 
     pub async fn run(&self) -> eyre::Result<()> {
-        self.spawn_health_monitor().await?;
-        self.ensure_single_sequencer(false).await?;
+        self.ensure_single_sequencer(true).await?;
         self.wait_ready().await?;
         self.ensure_single_sequencer(true).await?;
+
+        info!("Starting sequencer rotation loop...");
+        loop {
+            let current_index = self.active_pair.load(Ordering::Relaxed) as usize;
+            let next_index = (current_index + 1) % self.pairs.len();
+            let p1 = &self.pairs[current_index];
+            let p2 = &self.pairs[next_index];
+            while p1.is_alive().await {
+                for (i, pair) in self.pairs.iter().enumerate() {
+                    if i == current_index {
+                        continue;
+                    }
+                    let _ = pair.stop_sequencer().await;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+            let _ = p1.stop_sequencer().await;
+            p1.deactivate().await;
+            let _ = p2.start_sequencer(p2.get_current_unsafe_l2().await).await;
+            p2.activate().await;
+            info!("Switched active sequencer from Node {} to Node {}", current_index , next_index);
+            self.active_pair.store(next_index as u64, Ordering::Relaxed);
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
 
         Ok(())
     }

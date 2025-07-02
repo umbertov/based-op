@@ -232,7 +232,7 @@ impl PortalServerInner {
                     let ping_duration = ping_start.elapsed();
                     gateway.ping = Arc::new(ping_duration);
                     gateway.last_seen = Arc::new(Some(Instant::now()));
-                    info!("successfully pinged gateway={} ping={:>9}", gateway.id, ping_duration.to_string());
+                    // info!("successfully pinged gateway={} ping={:>9}", gateway.id, ping_duration.to_string());
                 }
                 Err(err) => {
                     error!(%err, ?gateway, "failed to ping gateway");
