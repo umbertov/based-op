@@ -378,7 +378,6 @@ fn create_auth_client(url: Url, jwt: JwtSecret, timeout: Duration) -> eyre::Resu
     Ok(client)
 }
 
-
 pub struct ProxyManager {
     pub pairs: Vec<NodeGethPair>,
     pub active_pair: Arc<AtomicU64>,
@@ -387,15 +386,27 @@ pub struct ProxyManager {
 
 impl ProxyManager {
     pub fn new(portal: PortalServer) -> Self {
-        ProxyManager {
-            pairs: Vec::new(),
-            active_pair: Arc::new(AtomicU64::new(0)),
-            portal,
-        }
+        ProxyManager { pairs: Vec::new(), active_pair: Arc::new(AtomicU64::new(0)), portal }
     }
 
-    pub async fn add_pair(&mut self, pair: NodeGethPair) {
+    pub async fn setup(&mut self, proxies_args: Vec<NodeGethPairArgs>) -> eyre::Result<()> {
+        for args in proxies_args {
+            let proxy = NodeGethPair::new(args).await;
+            let p = proxy.clone();
+            tokio::spawn(async move {
+                let _ = p.run().await.unwrap().stopped().await;
+            });
+            self.add_pair(proxy.clone());
+        }
+        Ok(())
+    }
+
+    pub fn add_pair(&mut self, pair: NodeGethPair) {
         self.pairs.push(pair);
+    }
+
+    pub fn get_pairs(&self) -> &Vec<NodeGethPair> {
+        &self.pairs
     }
 
     pub async fn ensure_single_sequencer(&self, bridge_portal: bool) -> eyre::Result<()> {
@@ -423,9 +434,7 @@ impl ProxyManager {
             }
         }
         if bridge_portal {
-            self.pairs[self.active_pair.load(Ordering::Relaxed) as usize]
-                .activate()
-                .await;
+            self.pairs[self.active_pair.load(Ordering::Relaxed) as usize].activate().await;
         }
         info!("Single sequencer ensured, active pair index: {}", self.active_pair.load(Ordering::Relaxed));
         Ok(())
@@ -519,7 +528,7 @@ impl ProxyManager {
             p1.deactivate().await;
             let _ = p2.start_sequencer(p2.get_current_unsafe_l2().await).await;
             p2.activate().await;
-            info!("Switched active sequencer from Node {} to Node {}", current_index , next_index);
+            info!("Switched active sequencer from Node {} to Node {}", current_index, next_index);
             self.active_pair.store(next_index as u64, Ordering::Relaxed);
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
