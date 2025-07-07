@@ -12,7 +12,7 @@ use reth_rpc_layer::JwtSecret;
 use server::{PortalServer, PortalServerInner};
 use tracing::{error, info};
 
-use crate::proxy::{NodeGethPair, ProxyManager};
+use crate::proxy::{NodeGethPair, NodeGethPairConfig, ProxyManager};
 
 mod cli;
 mod middleware;
@@ -29,30 +29,9 @@ async fn main() -> eyre::Result<()> {
 
     info!(%addr, registry_url = %args.registry_url, fallback_url = %args.fallback_url, fallback_eth_url = %args.fallback_eth_url, "starting Based Portal");
 
-    let jwt_secret = JwtSecret::from_hex("0x34156704bca7c6396348ffec4b3a8097b089066f8b996f29a2c7d70164fb94df").unwrap();
 
-    let proxies_args = vec![
-        proxy::NodeGethPairArgs {
-            op_node_url: Url::parse("http://localhost:9545").unwrap(),
-            op_geth_url: Url::parse("http://localhost:8545").unwrap(),
-            op_geth_engine_url: Url::parse("http://localhost:8551").unwrap(),
-            op_geth_engine_jwt: jwt_secret.clone(),
-            portal: portal_server.clone(),
-            timeout_ms: 1000,
-            ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8550),
-        },
-        proxy::NodeGethPairArgs {
-            op_node_url: Url::parse("http://localhost:19545").unwrap(),
-            op_geth_url: Url::parse("http://localhost:18545").unwrap(),
-            op_geth_engine_url: Url::parse("http://localhost:18551").unwrap(),
-            op_geth_engine_jwt: jwt_secret.clone(),
-            portal: portal_server.clone(),
-            timeout_ms: 1000,
-            ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 18550),
-        },
-    ];
     let mut manager = ProxyManager::new(portal_server.clone());
-    manager.setup(proxies_args).await?;
+    manager.setup_from_config_file("test_config.json").await?;
     let proxies = manager.get_pairs().clone();
     tokio::spawn(async move {
         let _ = manager.run().await;

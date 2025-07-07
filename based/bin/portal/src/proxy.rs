@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -34,6 +34,7 @@ use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayload
 use parking_lot::RwLock;
 use reqwest::Url;
 use reth_rpc_layer::{AuthClientLayer, AuthClientService, JwtSecret};
+use serde::Deserialize;
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
@@ -52,6 +53,42 @@ pub struct NodeGethPairArgs {
     pub portal: PortalServer,
     pub timeout_ms: u64,
     pub ingress_addr: SocketAddr,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NodeGethPairArgsRaw {
+    op_node_url: String,
+    op_geth_url: String,
+    op_geth_engine_url: String,
+    op_geth_engine_jwt: String,
+    ingress_port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NodeGethPairConfig {
+    pub proxies: Vec<NodeGethPairArgsRaw>,
+    pub timeout_ms: u64,
+}
+
+impl NodeGethPairConfig {
+    pub fn into_args(self, portal: &PortalServer) -> Vec<NodeGethPairArgs> {
+        self.proxies
+            .into_iter()
+            .map(|proxy| {
+                NodeGethPairArgs {
+                    op_node_url: Url::parse(&proxy.op_node_url).expect("Invalid op_node_url"),
+                    op_geth_url: Url::parse(&proxy.op_geth_url).expect("Invalid op_geth_url"),
+                    op_geth_engine_url: Url::parse(&proxy.op_geth_engine_url).expect("Invalid op_geth_engine_url"),
+                    op_geth_engine_jwt: JwtSecret::from_hex(&proxy.op_geth_engine_jwt).expect("Invalid JWT secret"),
+                    portal: portal.clone(),
+                    timeout_ms: self.timeout_ms,
+                    ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), proxy.ingress_port),
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -115,7 +152,7 @@ impl NodeGethPair {
             .await?;
 
         let mut module = EngineApiServer::into_rpc((*self.inner).clone());
-        module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
+        // module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
 
         let server_handle = server.start(module);
         Ok(server_handle)
@@ -192,94 +229,87 @@ impl NodeGethPairInner {
     }
 }
 
-/// This is a temporary API to broacast transactions to both gateway and fallback. In practice this should not be
-/// receiving user facing calls so we need to find another way to do this
-#[async_trait]
-impl EthApiServer for NodeGethPairInner {
-    #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
-    async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.send_raw_transaction(bytes.clone()).await;
-        } else {
-            match self.op_geth_client.send_raw_transaction(bytes.clone()).await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
+// /// This is a temporary API to broacast transactions to both gateway and fallback. In practice this should not be
+// /// receiving user facing calls so we need to find another way to do this
+// #[async_trait]
+// impl EthApiServer for NodeGethPairInner {
+//     #[tracing::instrument(skip_all, err, ret(level = Level::DEBUG), fields(req_id = %uuid()))]
+//     async fn send_raw_transaction(&self, bytes: Bytes) -> RpcResult<B256> {
+//         return self.portal.inner.send_raw_transaction(bytes.clone()).await;
+//     }
 
-    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
-    async fn transaction_receipt(&self, hash: B256) -> RpcResult<Option<OpTransactionReceipt>> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.transaction_receipt(hash).await;
-        } else {
-            match self.op_geth_client.transaction_receipt(hash).await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
+//     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+//     async fn transaction_receipt(&self, hash: B256) -> RpcResult<Option<OpTransactionReceipt>> {
+//         if self.active.load(Ordering::Relaxed) {
+//             return self.portal.inner.transaction_receipt(hash).await;
+//         } else {
+//             match self.op_geth_client.transaction_receipt(hash).await {
+//                 Ok(payload) => Ok(payload),
+//                 Err(_err) => Err(RpcError::Internal),
+//             }
+//         }
+//     }
 
-    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
-    async fn block_by_number(&self, number: BlockNumberOrTag, full: bool) -> RpcResult<Option<OpRpcBlock>> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.block_by_number(number, full).await;
-        } else {
-            match self.op_geth_client.block_by_number(number, full).await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
+//     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+//     async fn block_by_number(&self, number: BlockNumberOrTag, full: bool) -> RpcResult<Option<OpRpcBlock>> {
+//         if self.active.load(Ordering::Relaxed) {
+//             return self.portal.inner.block_by_number(number, full).await;
+//         } else {
+//             match self.op_geth_client.block_by_number(number, full).await {
+//                 Ok(payload) => Ok(payload),
+//                 Err(_err) => Err(RpcError::Internal),
+//             }
+//         }
+//     }
 
-    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
-    async fn block_by_hash(&self, hash: B256, full: bool) -> RpcResult<Option<OpRpcBlock>> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.block_by_hash(hash, full).await;
-        } else {
-            match self.op_geth_client.block_by_hash(hash, full).await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
+//     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+//     async fn block_by_hash(&self, hash: B256, full: bool) -> RpcResult<Option<OpRpcBlock>> {
+//         if self.active.load(Ordering::Relaxed) {
+//             return self.portal.inner.block_by_hash(hash, full).await;
+//         } else {
+//             match self.op_geth_client.block_by_hash(hash, full).await {
+//                 Ok(payload) => Ok(payload),
+//                 Err(_err) => Err(RpcError::Internal),
+//             }
+//         }
+//     }
 
-    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
-    async fn block_number(&self) -> RpcResult<U256> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.block_number().await;
-        } else {
-            match self.op_geth_client.block_number().await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
+//     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+//     async fn block_number(&self) -> RpcResult<U256> {
+//         if self.active.load(Ordering::Relaxed) {
+//             return self.portal.inner.block_number().await;
+//         } else {
+//             match self.op_geth_client.block_number().await {
+//                 Ok(payload) => Ok(payload),
+//                 Err(_err) => Err(RpcError::Internal),
+//             }
+//         }
+//     }
 
-    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
-    async fn transaction_count(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.transaction_count(address, block_number).await;
-        } else {
-            match self.op_geth_client.transaction_count(address, block_number).await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
+//     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+//     async fn transaction_count(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
+//         if self.active.load(Ordering::Relaxed) {
+//             return self.portal.inner.transaction_count(address, block_number).await;
+//         } else {
+//             match self.op_geth_client.transaction_count(address, block_number).await {
+//                 Ok(payload) => Ok(payload),
+//                 Err(_err) => Err(RpcError::Internal),
+//             }
+//         }
+//     }
 
-    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
-    async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
-        if self.active.load(Ordering::Relaxed) {
-            return self.portal.inner.balance(address, block_number).await;
-        } else {
-            match self.op_geth_client.balance(address, block_number).await {
-                Ok(payload) => Ok(payload),
-                Err(_err) => Err(RpcError::Internal),
-            }
-        }
-    }
-}
+//     #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+//     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256> {
+//         if self.active.load(Ordering::Relaxed) {
+//             return self.portal.inner.balance(address, block_number).await;
+//         } else {
+//             match self.op_geth_client.balance(address, block_number).await {
+//                 Ok(payload) => Ok(payload),
+//                 Err(_err) => Err(RpcError::Internal),
+//             }
+//         }
+//     }
+// }
 
 #[async_trait]
 impl EngineApiServer for NodeGethPairInner {
@@ -398,6 +428,23 @@ impl ProxyManager {
             });
             self.add_pair(proxy.clone());
         }
+
+        self.portal.inner.proxies.write().extend(self.pairs.iter().cloned());
+
+        Ok(())
+    }
+
+    pub async fn setup_from_config_file(
+        &mut self,
+        config_file: &str,
+    ) -> eyre::Result<()> {
+        let file = std::fs::File::open(config_file).expect("Failed to open NodeGethPairConfig config json file");
+        let node_geth_pair_config: NodeGethPairConfig =
+            serde_json::from_reader(file).expect("Failed to parse NodeGethPairConfig config json file");
+        info!("Loaded NodeGethPairConfig from file: {:?}", node_geth_pair_config);
+        let proxies_args = node_geth_pair_config.into_args(&self.portal);
+        self.setup(proxies_args).await?;
+        info!("Setup NodeGethPairs from config file completed.");
         Ok(())
     }
 
@@ -416,6 +463,7 @@ impl ProxyManager {
             if pair.sequencer_active().await {
                 sequencer_count += 1;
                 if sequencer_count > 1 {
+                    let _ = pair.deactivate().await;
                     let _ = pair.stop_sequencer().await;
                 } else {
                     self.active_pair.store(idx as u64, Ordering::Relaxed);
@@ -433,8 +481,11 @@ impl ProxyManager {
                 }
             }
         }
+        if sequencer_count == 0 {
+            error!("No active sequencer found across all pairs!");
+        }
         if bridge_portal {
-            self.pairs[self.active_pair.load(Ordering::Relaxed) as usize].activate().await;
+            let _ = self.pairs[self.active_pair.load(Ordering::Relaxed) as usize].activate().await;
         }
         info!("Single sequencer ensured, active pair index: {}", self.active_pair.load(Ordering::Relaxed));
         Ok(())
@@ -510,6 +561,7 @@ impl ProxyManager {
         self.ensure_single_sequencer(true).await?;
 
         info!("Starting sequencer rotation loop...");
+
         loop {
             let current_index = self.active_pair.load(Ordering::Relaxed) as usize;
             let next_index = (current_index + 1) % self.pairs.len();

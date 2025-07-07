@@ -89,6 +89,7 @@ pub struct PortalServerInner {
     pub current_block_number: Arc<AtomicU64>,
     pub args: Arc<PortalArgs>,
     pub current_proxy: Arc<Mutex<Option<NodeGethPair>>>,
+    pub proxies: Arc<RwLock<Vec<NodeGethPair>>>,
 }
 
 #[derive(Clone)]
@@ -109,10 +110,6 @@ impl PortalServer {
 
         let self_clone = self.clone();
         let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
-            // let rt = tokio::runtime::Handle::current();
-            // let guard = rt.block_on(self_clone.inner.current_proxy.lock());
-            // let current_proxy =
-            //     <std::option::Option<NodeGethPair> as Clone>::clone(&(*guard)).expect("No current proxy set");
             let current_proxy = tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
                 // Now we can block on the future inside block_in_place
@@ -186,6 +183,7 @@ impl PortalServerInner {
             current_block_number: Arc::new(AtomicU64::new(0)),
             args: Arc::new(args),
             current_proxy: Arc::new(Mutex::new(None)),
+            proxies: Arc::new(RwLock::new(vec![])),
         };
 
         match temp.refresh_gateway_list().await {
@@ -372,7 +370,16 @@ impl EthApiServer for PortalServerInner {
             let guard = self.current_proxy.lock().await;
             guard.as_ref().expect("No current proxy set").inner.op_geth_client.clone()
         };
-        let response = op_geth_client.send_raw_transaction(bytes).await?;
+        let response = op_geth_client.send_raw_transaction(bytes.clone()).await?;
+
+        let proxies = self.proxies.read().clone();
+        for proxy in proxies.iter().cloned() {
+            let bytes = bytes.clone();
+            tokio::spawn(async move {
+                let _ = proxy.inner.op_geth_client.send_raw_transaction(bytes).await;
+            });
+        }
+
         Ok(response)
     }
 

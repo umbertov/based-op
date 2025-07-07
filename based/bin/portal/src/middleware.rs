@@ -17,9 +17,9 @@ use crate::server::{AuthRpcClient, RpcClient};
 pub struct ProxyService<S> {
     supported_methods: &'static [&'static str],
     inner: S,
-    fallback_eth_client: RpcClient,
-    fallback_client: AuthRpcClient,
-    op_client: RpcClient,
+    op_geth_client: RpcClient,
+    op_geth_engine_client: AuthRpcClient,
+    op_node_client: RpcClient,
     registry_client: RpcClient,
 }
 
@@ -32,7 +32,7 @@ impl<S> ProxyService<S> {
         op_client: RpcClient,
         registry_client: RpcClient,
     ) -> Self {
-        Self { supported_methods, inner, fallback_eth_client, fallback_client, op_client, registry_client }
+        Self { supported_methods, inner, op_geth_client: fallback_eth_client, op_geth_engine_client: fallback_client, op_node_client: op_client, registry_client }
     }
 }
 
@@ -46,10 +46,10 @@ where
     fn call(&self, req: Request<'a>) -> Self::Future {
         //TODO: is this really the best way to do this?
         let inner = self.inner.clone();
-        let fallback_client = self.fallback_client.clone();
-        let fallback_eth_client = self.fallback_eth_client.clone();
+        let op_geth = self.op_geth_client.clone();
+        let op_geth_engine = self.op_geth_engine_client.clone();
+        let op_node = self.op_node_client.clone();
         let registry_client = self.registry_client.clone();
-        let op_client = self.op_client.clone();
 
         let supported_methods = self.supported_methods;
 
@@ -63,50 +63,51 @@ where
                 {
                     Some(("engine", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth engine fallback");
-                        fallback_client.clone().request(req.method_name(), params).await
+                        op_geth_engine.request(req.method_name(), params).await
                     }
                     Some(("eth", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth fallback");
-                        fallback_eth_client.clone().request(req.method_name(), params).await
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some(("miner", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth fallback");
-                        fallback_eth_client.clone().request(req.method_name(), params).await
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some(("net", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth fallback");
-                        fallback_eth_client.clone().request(req.method_name(), params).await
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some(("web3", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth fallback");
-                        fallback_eth_client.clone().request(req.method_name(), params).await
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some(("admin", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth fallback");
-                        fallback_eth_client.clone().request(req.method_name(), params).await
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some(("txpool", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to eth fallback");
-                        fallback_eth_client.clone().request(req.method_name(), params).await
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some(("optimism", _)) | Some(("opp2p", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to op-node fallback");
-                        op_client.request(req.method_name(), params).await
+                        op_node.request(req.method_name(), params).await
                     }
-
                     Some(("node", rest)) => {
                         debug!(method = %req.method_name(), "forwarding request to op-node");
-                        op_client.request(rest, params).await
+                        op_node.request(rest, params).await
                     }
-
                     Some(("geth", rest)) => {
                         debug!(method = %req.method_name(), "forwarding request to op-geth");
-                        fallback_client.clone().request(rest, params).await
+                        op_geth_engine.request(rest, params).await
                     }
-
                     Some(("registry", _)) => {
                         debug!(method = %req.method_name(), "forwarding request to registry");
                         registry_client.request(req.method_name(), params).await
+                    }
+                    Some(("debug", _)) => {
+                        debug!(method = %req.method_name(), "forwarding request to op-geth");
+                        op_geth.request(req.method_name(), params).await
                     }
                     Some((_, _)) => {
                         error!(method = %req.method_name(), "i don't know what to do with this");
@@ -132,7 +133,7 @@ where
                             }) =>
                     {
                         let r: Result<serde_json::Value, jsonrpsee::core::ClientError> =
-                            fallback_eth_client.clone().request("eth_getBlockByNumber", ("latest", false)).await;
+                            op_geth.clone().request("eth_getBlockByNumber", ("latest", false)).await;
                         match r {
                             Ok(r) => {
                                 tracing::warn!("Serving latest instead of finalized or safe for eth_getBlockByNumber. This should only happen at genesis!");
