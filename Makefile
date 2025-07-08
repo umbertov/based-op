@@ -349,6 +349,10 @@ start-main-node: create-network
 	@if [ ! -f .local_main_node/config/registry.json ]; then \
 		echo "[]" > .local_main_node/config/registry.json; \
 	fi
+	@# generate proxies.json if missing
+	@if [ ! -f .local_main_node/config/proxies.json ]; then \
+		cp main_node/proxies_example.json .local_main_node/config/proxies.json; \
+	fi
 	@echo "...Done"
 	@echo
 	@echo "Starting with the following generated .env:"

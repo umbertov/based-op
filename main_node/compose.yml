@@ -22,6 +22,7 @@ services:
           --state.scheme=hash \
           --http \
           --http.addr=0.0.0.0 \
+          --http.port=$OP_GETH_RPC_PORT \
           --http.vhosts="*" \
           --http.corsdomain="*" \
           --http.api="admin,engine,net,eth,web3,debug,miner,txpool" \
@@ -38,7 +39,6 @@ services:
           --rpc.allow-unprotected-txs \
           --discovery.port=$OP_GETH_GOSSIP_PORT \
           --port=$OP_GETH_GOSSIP_PORT \
-          --rollup.sequencerhttp=$PORTAL
     volumes:
       - ./data/geth:/data/geth
       - ./config:/config
@@ -57,7 +57,7 @@ services:
     # Override inter-container URLs for bridge networking
     command:
       - op-node
-      - --l2=http://0.0.0.0:${PORTAL_PORT}
+      - --l2=http://0.0.0.0:${PORTAL_PROXY_INGRESS_PORT}
       - --l2.jwt-secret=/config/jwt
       - --verifier.l1-confs=1
       - --rollup.config=/config/rollup.json
@@ -75,7 +75,8 @@ services:
       - --p2p.listen.udp=${OP_NODE_GOSSIP_PORT}
       - --p2p.sequencer.key=${OP_NODE_SEQUENCER_KEY}
       - --safedb.path=/data/op-node/op-node-beacon-data
-      - --sequencer.enabled
+      - --sequencer.enabled=true
+      - --sequencer.stopped=true
 
     volumes:
       - ./data/node:/data/op-node
@@ -84,7 +85,7 @@ services:
       - op-geth
       - based-portal
     restart: unless-stopped
-    
+
   op-batcher:
     image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-batcher:v1.13.2
     container_name: op-batcher
@@ -94,7 +95,7 @@ services:
     command:
       - op-batcher
       - --l2-eth-rpc=http://0.0.0.0:${PORTAL_PORT}
-      - --rollup-rpc=http://0.0.0.0:${OP_NODE_RPC_PORT}
+      - --rollup-rpc=http://0.0.0.0:${PORTAL_PORT}
       - --sub-safety-margin=6
       - --num-confirmations=1
       - --safe-abort-nonce-too-low-count=3
@@ -119,7 +120,7 @@ services:
       - op-proposer
       - --poll-interval=12s
       - --rpc.port=8560
-      - --rollup-rpc=http://0.0.0.0:${OP_NODE_RPC_PORT}
+      - --rollup-rpc=http://0.0.0.0:${PORTAL_PORT}
       - --game-factory-address=${DISPUTE_GAME_FACTORY_ADDRESS}
       - --game-type=${DISPUTE_GAME_TYPE}
       - --private-key=${OP_PROPOSER_PRIVATE_KEY}
@@ -136,10 +137,16 @@ services:
     container_name: based-portal
     network_mode: "host"
     # Override inter-container URLs for bridge networking
+    #TODO: remove these and replace with a file path to the proxy config
+    #  the following arguments are not used in the latest version of Based Portal
+    # - --fallback.eth_url=http://0.0.0.0:${OP_GETH_RPC_PORT}
+    # - --fallback.engine_url=http://0.0.0.0:${OP_GETH_ENGINE_RPC_PORT}
+    # - --op_node.url=http://0.0.0.0:${OP_NODE_RPC_PORT}
     command:
       - --fallback.eth_url=http://0.0.0.0:${OP_GETH_RPC_PORT}
       - --fallback.engine_url=http://0.0.0.0:${OP_GETH_ENGINE_RPC_PORT}
       - --op_node.url=http://0.0.0.0:${OP_NODE_RPC_PORT}
+      - --proxy.config_file=/config/proxies.json
       - --registry.url=http://0.0.0.0:${REGISTRY_PORT}
       - --gateway.timeout_ms=200
     volumes:
@@ -202,9 +209,9 @@ services:
     environment:
       DATABASE_URL: "postgresql://blockscout:blockscout@blockscout-postgres:5432/blockscout"
       # point to your L2 JSON-RPC:
-      ETHEREUM_JSONRPC_HTTP_URL: "http://0.0.0.0:${OP_GETH_RPC_PORT}"
-      ETHEREUM_JSONRPC_WS_URL: "ws://0.0.0.0:${OP_GETH_WS_PORT}"
-      ETHEREUM_JSONRPC_TRACE_URL: "http://0.0.0.0:${OP_GETH_RPC_PORT}"
+      ETHEREUM_JSONRPC_HTTP_URL: "http://0.0.0.0:${PORTAL_PORT}"
+      ETHEREUM_JSONRPC_WS_URL: "ws://0.0.0.0:${PORTAL_PORT}"
+      ETHEREUM_JSONRPC_TRACE_URL: "http://0.0.0.0:${PORTAL_PORT}"
       ETHEREUM_JSONRPC_VARIANT: "geth"
       SECRET_KEY_BASE: "56NtB48ear7+wMSf0IQuWDAAazhpb31qyc7GiyspBP2vh7t5zlCsF5QDv76chXeN"
       # A “network name” for Blockscout’s UI
@@ -216,3 +223,95 @@ services:
       PORT: "${BLOCKSCOUT_PORT}"
     # no ports: host-mode means Blockscout binds to 4000 on the host automatically
 
+
+
+################################################################################
+# Redundant Geth and Node
+################################################################################
+  op-geth-2:
+    image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-geth:v1.101503.4-rc.1
+    container_name: op-geth-2
+    network_mode: "host"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # 1) if this directory lacks the geth chaindata, initialize it
+        if [ ! -d /data/geth/geth/chaindata ]; then
+          echo ">>> initializing geth datadir…"
+          geth init \
+            --state.scheme=hash \
+            --datadir=/data/geth \
+            /config/genesis.json 
+        fi
+        # 2) then exec the real geth with all your flags
+        exec geth \
+          --networkid=$NETWORK_ID \
+          --datadir=/data/geth \
+          --gcmode=archive \
+          --state.scheme=hash \
+          --http \
+          --http.addr=0.0.0.0 \
+          --http.port=$OP_GETH_RPC_PORT_2 \
+          --http.vhosts="*" \
+          --http.corsdomain="*" \
+          --http.api="admin,engine,net,eth,web3,debug,miner,txpool" \
+          --ws \
+          --ws.addr=0.0.0.0 \
+          --ws.port=$OP_GETH_WS_PORT_2 \
+          --ws.api="admin,engine,net,eth,web3,debug,miner,txpool" \
+          --ws.origins="*" \
+          --authrpc.port=$OP_GETH_ENGINE_RPC_PORT_2 \
+          --authrpc.addr=0.0.0.0 \
+          --authrpc.vhosts="*" \
+          --authrpc.jwtsecret=/config/jwt \
+          --syncmode=full \
+          --rpc.allow-unprotected-txs \
+          --discovery.port=$OP_GETH_GOSSIP_PORT_2 \
+          --port=$OP_GETH_GOSSIP_PORT_2 \
+          --rollup.sequencerhttp=$PORTAL
+    volumes:
+      - ./data/geth_2:/data/geth
+      - ./config:/config
+    restart: unless-stopped
+
+  op-node-2:
+    image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.13.2
+    container_name: op-node-2
+    entrypoint:
+      - sh
+      - -c
+      - |
+        sleep "${OP_NODE_DELAY:-10}" &&
+        exec op-node "$@"
+    network_mode: "host"
+    # Override inter-container URLs for bridge networking
+    command:
+      - op-node
+      - --l2=http://0.0.0.0:${PORTAL_PROXY_INGRESS_PORT_2}
+      - --l2.jwt-secret=/config/jwt
+      - --verifier.l1-confs=1
+      - --rollup.config=/config/rollup.json
+      - --rpc.addr=0.0.0.0
+      - --rpc.port=${OP_NODE_RPC_PORT_2}
+      - --rpc.enable-admin
+      - --l1=${L1_RPC_URL}
+      - --l1.rpckind=standard
+      - --l1.beacon=${L1_BEACON_RPC_URL}
+      - --p2p.advertise.ip=${OP_NODE_GOSSIP_IP}
+      - --p2p.advertise.tcp=${OP_NODE_GOSSIP_PORT_2}
+      - --p2p.advertise.udp=${OP_NODE_GOSSIP_PORT_2}
+      - --p2p.listen.ip=0.0.0.0
+      - --p2p.listen.tcp=${OP_NODE_GOSSIP_PORT_2}
+      - --p2p.listen.udp=${OP_NODE_GOSSIP_PORT_2}
+      - --p2p.sequencer.key=${OP_NODE_SEQUENCER_KEY}
+      - --safedb.path=/data/op-node/op-node-beacon-data
+      - --sequencer.enabled=true
+      - --sequencer.stopped=true
+
+    volumes:
+      - ./data/node_2:/data/op-node
+      - ./config:/config
+    depends_on:
+      - op-geth-2
+      - based-portal
+    restart: unless-stopped

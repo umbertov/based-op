@@ -62,7 +62,7 @@ pub struct NodeGethPairArgsRaw {
     op_geth_url: String,
     op_geth_engine_url: String,
     op_geth_engine_jwt: String,
-    ingress_port: u16,
+    portal_ingress_port: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,7 +84,7 @@ impl NodeGethPairConfig {
                     op_geth_engine_jwt: JwtSecret::from_hex(&proxy.op_geth_engine_jwt).expect("Invalid JWT secret"),
                     portal: portal.clone(),
                     timeout_ms: self.timeout_ms,
-                    ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), proxy.ingress_port),
+                    ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), proxy.portal_ingress_port),
                 }
             })
             .collect()
@@ -556,6 +556,7 @@ impl ProxyManager {
     }
 
     pub async fn run(&self) -> eyre::Result<()> {
+        self.wait_all_initialized().await?;
         self.ensure_single_sequencer(true).await?;
         self.wait_ready().await?;
         self.ensure_single_sequencer(true).await?;

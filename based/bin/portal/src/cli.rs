@@ -37,6 +37,10 @@ pub struct PortalArgs {
     #[arg(long = "fallback.jwt", default_value = "/config/jwt")]
     pub fallback_jwt: String,
 
+    /// Proxy config file path
+    #[arg(long = "proxy.config_file", default_value = "proxies_example.json")]
+    pub proxy_config_file: String,
+
     /// Timeout for gateway requests in milliseconds
     #[arg(long = "gateway.timeout_ms", default_value_t = 100)]
     pub gateway_timeout_ms: u64,

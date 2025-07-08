@@ -1,0 +1,19 @@
+{
+    "Proxies": [
+        {
+            "OpNodeUrl": "http://localhost:9545",
+            "OpGethUrl": "http://localhost:8545",
+            "OpGethEngineUrl": "http://localhost:8551",
+            "OpGethEngineJwt": "0x34156704bca7c6396348ffec4b3a8097b089066f8b996f29a2c7d70164fb94df",
+            "PortalIngressPort": 8550
+        },
+        {
+            "OpNodeUrl": "http://localhost:19545",
+            "OpGethUrl": "http://localhost:18545",
+            "OpGethEngineUrl": "http://localhost:18551",
+            "OpGethEngineJwt": "0x34156704bca7c6396348ffec4b3a8097b089066f8b996f29a2c7d70164fb94df",
+            "PortalIngressPort": 18550
+        }
+    ],
+    "TimeoutMs": 1000
+}
