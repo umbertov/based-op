@@ -140,6 +140,10 @@ pub trait EthApi {
     /// Returns the balance of the account of given address.
     #[method(name = "getBalance")]
     async fn balance(&self, address: Address, block_number: Option<BlockId>) -> RpcResult<U256>;
+
+    /// Get chain id
+    #[method(name = "chainId")]
+    async fn chain_id(&self) -> RpcResult<String>;
 }
 
 #[rpc(client, server, namespace = "eth")]

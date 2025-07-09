@@ -21,12 +21,12 @@ use bop_common::{
     },
     communication::messages::{RpcError, RpcResult},
     time::{Duration, Instant},
-    utils::{uuid, wait_for_signal},
+    utils::uuid,
 };
 use jsonrpsee::{
     core::{ClientError, async_trait},
     http_client::{HttpClientBuilder, transport::HttpBackend},
-    server::{HttpBody, RpcServiceBuilder, ServerBuilder, ServerHandle},
+    server::{RpcServiceBuilder, ServerBuilder, ServerHandle},
 };
 use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
@@ -44,7 +44,7 @@ pub type RpcClient = jsonrpsee::http_client::HttpClient;
 pub type AuthRpcClient = jsonrpsee::http_client::HttpClient<AuthClientService<HttpBackend>>;
 
 #[derive(Clone)]
-struct Gateway {
+pub struct Gateway {
     id: Url,
     jwt: String,
     address: Address,
@@ -105,7 +105,7 @@ impl PortalServer {
 }
 
 impl PortalServer {
-    pub async fn run(&self, addr: SocketAddr) -> eyre::Result<(ServerHandle)> {
+    pub async fn run(&self, addr: SocketAddr) -> eyre::Result<ServerHandle> {
         let registry_client = self.inner.registry_client.clone();
 
         let self_clone = self.clone();
@@ -368,7 +368,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let response = op_geth_client.send_raw_transaction(bytes.clone()).await?;
 
@@ -389,7 +392,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn(
             {
@@ -420,7 +426,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn(
             {
@@ -452,7 +461,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn(
             {
@@ -481,7 +493,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn(
             {
@@ -510,7 +525,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn(
             {
@@ -540,7 +558,10 @@ impl EthApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn(
             {
@@ -562,6 +583,25 @@ impl EthApiServer for PortalServerInner {
         let payload = gateway.or(fallback)?;
 
         Ok(payload)
+    }
+
+    #[tracing::instrument(skip_all, err, ret(level = Level::TRACE))]
+    async fn chain_id(&self) -> RpcResult<String> {
+        let op_geth_engine_client = {
+            let guard = self.current_proxy.lock().await;
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
+        };
+        let result = op_geth_engine_client.chain_id().await;
+        match result {
+            Ok(chain_id) => Ok(chain_id),
+            Err(err) => {
+                error!(%err, "Failed to get chain ID from the current proxy");
+                Err(RpcError::Internal)
+            }
+        }
     }
 }
 
@@ -596,7 +636,10 @@ impl EngineApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let response =
             op_geth_engine_client.fork_choice_updated_v3(fork_choice_state, payload_attributes.clone()).await?;
@@ -640,7 +683,10 @@ impl EngineApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let response = op_geth_engine_client
             .new_payload_v4(payload.clone(), versioned_hashes.clone(), parent_beacon_block_root, requests.clone())
@@ -700,7 +746,10 @@ impl EngineApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let response = op_geth_engine_client
             .new_payload_v3(payload.clone(), versioned_hashes.clone(), parent_beacon_block_root)
@@ -738,7 +787,10 @@ impl EngineApiServer for PortalServerInner {
 
         let op_geth_engine_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_engine_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_geth_engine_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         let fallback_fut = tokio::spawn({
             let client = op_geth_engine_client.clone();
@@ -816,7 +868,10 @@ impl PortalApiServer for PortalServerInner {
     async fn l2_chain_id(&self) -> RpcResult<u64> {
         let op_node_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_node_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         Ok(op_node_client.rollup_config().await.map(|config| config.l2_chain_id)?)
     }
@@ -825,7 +880,10 @@ impl PortalApiServer for PortalServerInner {
     async fn l1_chain_id(&self) -> RpcResult<u64> {
         let op_node_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_node_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         Ok(op_node_client.rollup_config().await.map(|config| config.l1_chain_id)?)
     }
@@ -846,7 +904,10 @@ impl PortalApiServer for PortalServerInner {
     async fn op_node_gossip_static(&self) -> RpcResult<String> {
         let op_node_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_node_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         Ok(op_node_client.peer_info().await.and_then(|p| {
             p.addresses.last().cloned().map(Ok).unwrap_or(Err(ClientError::Custom("empty peer addresses".to_string())))
@@ -857,7 +918,10 @@ impl PortalApiServer for PortalServerInner {
     async fn op_node_bootnode_enr(&self) -> RpcResult<String> {
         let op_node_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_node_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_node_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         Ok(op_node_client.peer_info().await.map(|p| p.enr)?)
     }
@@ -866,7 +930,10 @@ impl PortalApiServer for PortalServerInner {
     async fn op_geth_bootnode_enode(&self) -> RpcResult<String> {
         let op_geth_client = {
             let guard = self.current_proxy.lock().await;
-            guard.as_ref().expect("No current proxy set").inner.op_geth_client.clone()
+            match guard.as_ref() {
+                Some(proxy) => proxy.inner.op_node_client.clone(),
+                None => return Err(RpcError::Internal),
+            }
         };
         Ok(op_geth_client.node_info().await.map(|p| p.enode)?)
     }

@@ -32,7 +32,14 @@ impl<S> ProxyService<S> {
         op_client: RpcClient,
         registry_client: RpcClient,
     ) -> Self {
-        Self { supported_methods, inner, op_geth_client: fallback_eth_client, op_geth_engine_client: fallback_client, op_node_client: op_client, registry_client }
+        Self {
+            supported_methods,
+            inner,
+            op_geth_client: fallback_eth_client,
+            op_geth_engine_client: fallback_client,
+            op_node_client: op_client,
+            registry_client,
+        }
     }
 }
 

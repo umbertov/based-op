@@ -1,11 +1,9 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bop_common::utils::init_tracing;
 use clap::Parser;
 use cli::PortalArgs;
-use server::{PortalServer};
+use server::PortalServer;
 use tracing::info;
 
 use crate::proxy::{NodeGethPair, ProxyManager};
@@ -26,13 +24,17 @@ async fn main() -> eyre::Result<()> {
     info!(%addr, registry_url = %args.registry_url, "starting Based Portal");
 
     let mut manager = ProxyManager::new(portal_server.clone());
-    manager.setup_from_config_file(&args.proxy_config_file).await.expect("Failed to setup proxy manager from config file");
-    let proxies = manager.get_pairs().clone();
+    manager
+        .setup_from_config_file(&args.proxy_config_file)
+        .await
+        .expect("Failed to setup proxy manager from config file");
+    util_head_monitor(manager.get_pairs().clone());
+    manager.wait_all_initialized().await.expect("Failed to wait for all proxies to initialize");
+    manager.ensure_single_sequencer(true).await.expect("Failed to ensure single sequencer");
+
     tokio::spawn(async move {
         let _ = manager.run().await;
     });
-
-    util_head_monitor(proxies);
 
     let _ = tokio::join!(portal_server.run(addr).await?.stopped());
     Ok(())

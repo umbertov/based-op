@@ -132,8 +132,10 @@ services:
     restart: unless-stopped
 
   based-portal:
-    image: ghcr.io/gattaca-com/based-op/based-portal:latest 
-    pull_policy: always
+    # image: ghcr.io/gattaca-com/based-op/based-portal:latest
+    # pull_policy: always
+    image: local_based_portal:latest
+    pull_policy: if_not_present
     container_name: based-portal
     network_mode: "host"
     # Override inter-container URLs for bridge networking
@@ -154,17 +156,19 @@ services:
     restart: unless-stopped
 
   based-registry:
-    image: ghcr.io/gattaca-com/based-op/based-registry:latest
-    pull_policy: always
+    # image: ghcr.io/gattaca-com/based-op/based-registry:latest
+    # pull_policy: always
+    image: local_based_registry:latest
+    pull_policy: if_not_present
     container_name: based-registry
     network_mode: "host"
     # Override inter-container URLs for bridge networking
     command:
       - --registry.path=/config/registry.json
-      - --portal.url=http://0.0.0.0:${OP_GETH_RPC_PORT}
+      - --portal.url=http://0.0.0.0:${PORTAL_PORT}
       - --portal.timeout_ms=100
       - --port=${REGISTRY_PORT}
-    volumes: 
+    volumes:
       - ./config:/config
     restart: unless-stopped
     

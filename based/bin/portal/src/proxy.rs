@@ -1,5 +1,4 @@
 use std::{
-    fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
@@ -8,39 +7,31 @@ use std::{
 };
 
 use alloy_eips::eip7685::RequestsOrHash;
-use alloy_primitives::{Address, B256, Bytes, U256, hex};
-use alloy_rpc_types::{
-    BlockId, BlockNumberOrTag,
-    engine::{ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus, payload},
-};
-use axum::error_handling::future;
+use alloy_primitives::{B256, hex};
+use alloy_rpc_types::engine::{ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus};
 use bop_common::{
     api::{
-        ControlApiClient, EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient,
-        OpNodeAdminApiClient, OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PROXY_CAPABILITIES,
-        PortalApiServer, RegistryApiClient, RegistryApiServer,
+        EngineApiClient, EngineApiServer, EthApiClient, OpNodeAdminApiClient, OpNodeApiClient, OpNodeP2PApiClient,
+        PROXY_CAPABILITIES,
     },
     communication::messages::{RpcError, RpcResult},
-    time::{Duration, Instant},
-    utils::{uuid, wait_for_signal},
+    time::Duration,
+    utils::uuid,
 };
 use jsonrpsee::{
-    core::{ClientError, async_trait},
+    core::async_trait,
     http_client::{HttpClientBuilder, transport::HttpBackend},
-    server::{HttpBody, RpcServiceBuilder, ServerBuilder, ServerHandle},
+    server::{RpcServiceBuilder, ServerBuilder, ServerHandle},
 };
-use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
-use parking_lot::RwLock;
 use reqwest::Url;
 use reth_rpc_layer::{AuthClientLayer, AuthClientService, JwtSecret};
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{Instrument, Level, debug, error, info, trace, warn};
+use tracing::{Level, error, info, warn};
 
-use crate::{cli::PortalArgs, middleware::ProxyService, server::PortalServer};
+use crate::{middleware::ProxyService, server::PortalServer};
 
 pub type RpcClient = jsonrpsee::http_client::HttpClient;
 pub type AuthRpcClient = jsonrpsee::http_client::HttpClient<AuthClientService<HttpBackend>>;
@@ -76,16 +67,14 @@ impl NodeGethPairConfig {
     pub fn into_args(self, portal: &PortalServer) -> Vec<NodeGethPairArgs> {
         self.proxies
             .into_iter()
-            .map(|proxy| {
-                NodeGethPairArgs {
-                    op_node_url: Url::parse(&proxy.op_node_url).expect("Invalid op_node_url"),
-                    op_geth_url: Url::parse(&proxy.op_geth_url).expect("Invalid op_geth_url"),
-                    op_geth_engine_url: Url::parse(&proxy.op_geth_engine_url).expect("Invalid op_geth_engine_url"),
-                    op_geth_engine_jwt: JwtSecret::from_hex(&proxy.op_geth_engine_jwt).expect("Invalid JWT secret"),
-                    portal: portal.clone(),
-                    timeout_ms: self.timeout_ms,
-                    ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), proxy.portal_ingress_port),
-                }
+            .map(|proxy| NodeGethPairArgs {
+                op_node_url: Url::parse(&proxy.op_node_url).expect("Invalid op_node_url"),
+                op_geth_url: Url::parse(&proxy.op_geth_url).expect("Invalid op_geth_url"),
+                op_geth_engine_url: Url::parse(&proxy.op_geth_engine_url).expect("Invalid op_geth_engine_url"),
+                op_geth_engine_jwt: JwtSecret::from_hex(&proxy.op_geth_engine_jwt).expect("Invalid JWT secret"),
+                portal: portal.clone(),
+                timeout_ms: self.timeout_ms,
+                ingress_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), proxy.portal_ingress_port),
             })
             .collect()
     }
@@ -97,7 +86,6 @@ pub struct NodeGethPairInner {
     pub op_geth_client: RpcClient,
     pub op_geth_engine_client: AuthRpcClient,
     pub portal: PortalServer,
-    pub head_hash: B256,
     pub active: Arc<AtomicBool>,
     pub ingress_addr: SocketAddr,
 }
@@ -122,7 +110,7 @@ impl NodeGethPair {
         self.inner.active.store(false, Ordering::Relaxed);
     }
 
-    pub async fn run(&self) -> eyre::Result<(ServerHandle)> {
+    pub async fn run(&self) -> eyre::Result<ServerHandle> {
         // Clone the necessary fields before moving into the closure
         let op_geth_client = self.inner.op_geth_client.clone();
         let op_geth_engine_client = self.inner.op_geth_engine_client.clone();
@@ -151,7 +139,7 @@ impl NodeGethPair {
             .build(ingress_addr)
             .await?;
 
-        let mut module = EngineApiServer::into_rpc((*self.inner).clone());
+        let module = EngineApiServer::into_rpc((*self.inner).clone());
         // module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
 
         let server_handle = server.start(module);
@@ -161,14 +149,15 @@ impl NodeGethPair {
     pub async fn get_current_unsafe_l2(&self) -> B256 {
         match self.inner.op_node_client.sync_status().await {
             Ok(status) => status.unsafe_l2.hash,
-            Err(err) => B256::ZERO,
+            Err(_err) => B256::ZERO,
         }
     }
 
-    pub async fn get_current_safe_l2(&self) -> B256 {
-        match self.inner.op_node_client.sync_status().await {
-            Ok(status) => status.safe_l2.hash,
-            Err(err) => B256::ZERO,
+    pub async fn get_chain_id(&self) -> eyre::Result<String> {
+        let info = self.inner.op_geth_client.chain_id().await;
+        match info {
+            Ok(info) => Ok(info),
+            Err(err) => Err(eyre::eyre!("Failed to get chain ID: {}", err)),
         }
     }
 
@@ -206,7 +195,13 @@ impl NodeGethPair {
     }
 
     pub async fn is_alive(&self) -> bool {
-        !self.get_current_unsafe_l2().await.is_zero()
+        for _ in 0..3 {
+            if (!self.get_current_unsafe_l2().await.is_zero()) && self.get_chain_id().await.is_ok() {
+                return true;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        false
     }
 }
 
@@ -222,7 +217,6 @@ impl NodeGethPairInner {
             op_geth_client,
             op_geth_engine_client,
             portal: args.portal,
-            head_hash: B256::ZERO,
             active: Arc::new(AtomicBool::new(false)),
             ingress_addr: args.ingress_addr,
         })
@@ -434,10 +428,7 @@ impl ProxyManager {
         Ok(())
     }
 
-    pub async fn setup_from_config_file(
-        &mut self,
-        config_file: &str,
-    ) -> eyre::Result<()> {
+    pub async fn setup_from_config_file(&mut self, config_file: &str) -> eyre::Result<()> {
         let file = std::fs::File::open(config_file).expect("Failed to open NodeGethPairConfig config json file");
         let node_geth_pair_config: NodeGethPairConfig =
             serde_json::from_reader(file).expect("Failed to parse NodeGethPairConfig config json file");
@@ -496,7 +487,7 @@ impl ProxyManager {
         while !all_initialized {
             all_initialized = true;
             for pair in &self.pairs {
-                if pair.get_current_unsafe_l2().await.is_zero() {
+                if !pair.is_alive().await {
                     all_initialized = false;
                     break;
                 }
@@ -535,8 +526,6 @@ impl ProxyManager {
             return Err(eyre::eyre!("No pairs available for head sync"));
         }
         self.wait_all_initialized().await?;
-        info!("All pairs are initialized, proceeding to head sync...");
-        self.pair_all_nodes().await?;
         info!("All nodes are paired, proceeding to head sync...");
         self.wait_head_sync().await?;
         info!("All nodes are synced to head, proceeding to ensure single sequencer...");
@@ -557,18 +546,18 @@ impl ProxyManager {
 
     pub async fn run(&self) -> eyre::Result<()> {
         self.wait_all_initialized().await?;
+        self.pair_all_nodes().await?;
         self.ensure_single_sequencer(true).await?;
         self.wait_ready().await?;
         self.ensure_single_sequencer(true).await?;
 
         info!("Starting sequencer rotation loop...");
-
         loop {
             let current_index = self.active_pair.load(Ordering::Relaxed) as usize;
             let next_index = (current_index + 1) % self.pairs.len();
             let p1 = &self.pairs[current_index];
             let p2 = &self.pairs[next_index];
-            while p1.is_alive().await {
+            while p1.is_alive().await && p1.sequencer_active().await {
                 for (i, pair) in self.pairs.iter().enumerate() {
                     if i == current_index {
                         continue;
@@ -583,9 +572,8 @@ impl ProxyManager {
             p2.activate().await;
             info!("Switched active sequencer from Node {} to Node {}", current_index, next_index);
             self.active_pair.store(next_index as u64, Ordering::Relaxed);
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
-
-        Ok(())
+        // Ok(())
     }
 }

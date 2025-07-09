@@ -43,3 +43,5 @@ based/data
 based/genesis.json
 based/temp_registry.json
 temp
+_.local_main_node
+_.local_main_node2
