@@ -1621,6 +1621,7 @@ dependencies = [
  "axum",
  "bop-common",
  "clap",
+ "either",
  "eyre",
  "futures",
  "jsonrpsee",

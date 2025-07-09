@@ -15,13 +15,8 @@ use alloy_rpc_types::{
 };
 use bop_common::{
     api::{
-        ControlApiClient, EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient,
-        OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PORTAL_CAPABILITIES, PortalApiServer, RegistryApiClient,
-        RegistryApiServer,
-    },
-    communication::messages::{RpcError, RpcResult},
-    time::{Duration, Instant},
-    utils::uuid,
+        ControlApiClient, EngineApiClient, EngineApiServer, EthApiClient, EthApiServer, OpGethAdminApiClient, OpNodeApiClient, OpNodeP2PApiClient, OpRpcBlock, PortalApiServer, RegistryApiClient, RegistryApiServer, PORTAL_CAPABILITIES
+    }, communication::messages::{RpcError, RpcResult}, debug_panic, time::{Duration, Instant}, utils::uuid
 };
 use jsonrpsee::{
     core::{ClientError, async_trait},
@@ -80,7 +75,6 @@ impl Gateway {
 #[derive(Clone)]
 pub struct PortalServerInner {
     pub registry_client: RpcClient,
-    pub current_gateway_candidate: Arc<Mutex<Option<Gateway>>>,
     pub current_gateway: Arc<Mutex<Option<Gateway>>>,
     pub gateway_timeout: Duration,
     pub gateways: Arc<RwLock<Vec<Gateway>>>,
@@ -98,7 +92,7 @@ pub struct PortalServer {
 }
 
 impl PortalServer {
-    pub async fn new(args: PortalArgs) -> eyre::Result<Self> {
+    pub async fn new(args: &PortalArgs) -> eyre::Result<Self> {
         let inner = PortalServerInner::new(args).await?;
         Ok(Self { inner: Arc::new(inner) })
     }
@@ -144,7 +138,6 @@ impl PortalServer {
         let mut module = EngineApiServer::into_rpc((*self.inner).clone());
         module.merge(EthApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
         module.merge(PortalApiServer::into_rpc((*self.inner).clone())).expect("failed to merge modules");
-
         let self_clone = self.clone();
         tokio::spawn(async move {
             loop {
@@ -158,12 +151,13 @@ impl PortalServer {
             }
         });
         let server_handle = server.start(module);
+        server_handle.
         Ok(server_handle)
     }
 }
 
 impl PortalServerInner {
-    pub async fn new(args: PortalArgs) -> eyre::Result<Self> {
+    pub async fn new(args: &PortalArgs) -> eyre::Result<Self> {
         let registry_client =
             create_client(args.registry_url.clone(), Duration::from_millis(args.registry_timeout_ms))?;
 
@@ -174,21 +168,20 @@ impl PortalServerInner {
 
         let temp = Self {
             registry_client,
-            current_gateway_candidate: Arc::new(Mutex::new(None)),
             current_gateway: Arc::new(Mutex::new(None)),
             gateway_timeout,
             gateways,
             new_payload_block_number: Arc::new(AtomicU64::new(0)),
             new_payload_block_hash: Arc::new(Mutex::new(B256::ZERO)),
             current_block_number: Arc::new(AtomicU64::new(0)),
-            args: Arc::new(args),
+            args: Arc::new(args.clone()),
             current_proxy: Arc::new(Mutex::new(None)),
             proxies: Arc::new(RwLock::new(vec![])),
         };
 
         match temp.refresh_gateway_list().await {
             Ok(_) => {
-                temp.update_current_gateway().await?;
+                temp.update_current_gateway(0, None).await?;
                 info!("Successfully fetched registered gateways");
             }
             Err(err) => {
@@ -230,7 +223,6 @@ impl PortalServerInner {
                     let ping_duration = ping_start.elapsed();
                     gateway.ping = Arc::new(ping_duration);
                     gateway.last_seen = Arc::new(Some(Instant::now()));
-                    // info!("successfully pinged gateway={} ping={:>9}", gateway.id, ping_duration.to_string());
                 }
                 Err(err) => {
                     error!(%err, ?gateway, "failed to ping gateway");
@@ -242,7 +234,7 @@ impl PortalServerInner {
         Ok(())
     }
 
-    async fn update_current_gateway_candidate(
+    async fn update_current_gateway(
         &self,
         n_blocks_into_future: u64,
         expected_block_number: Option<u64>,
@@ -250,29 +242,20 @@ impl PortalServerInner {
         let (block_number, gateway_url, _, _) = self.registry_client.get_future_gateway(n_blocks_into_future).await?;
         if let Some(expected_block_number) = expected_block_number {
             if block_number != expected_block_number {
-                error!(
+                debug_panic!(
                     "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
                     block_number, expected_block_number
                 );
-                panic!(
-                    "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
-                    block_number, expected_block_number
-                );
-                // return Ok(());
+                return Ok(());
             }
         }
         let current_gateway_index = self.gateways().iter().position(|g| g.id == gateway_url);
         match current_gateway_index {
             Some(index) => {
-                let gateway = self.gateways().get(index).cloned().unwrap();
-                *self.current_gateway_candidate.lock().await = Some(gateway);
+                let mut gateway = self.gateways().get(index).cloned().unwrap();
+
                 let mut i = index;
-                while !self
-                    .current_gateway_candidate
-                    .lock()
-                    .await
-                    .as_ref()
-                    .unwrap()
+                while !gateway
                     .is_active(self.args.gateway_inactivity_timeout_ms)
                 {
                     i = (i + 1) % self.gateways().len();
@@ -280,8 +263,9 @@ impl PortalServerInner {
                         error!("CRITICAL: No gateway is available, all gateways are stale");
                         return Ok(());
                     }
-                    *self.current_gateway_candidate.lock().await = Some(self.gateways().get(i).cloned().unwrap());
+                    gateway = self.gateways().get(index).cloned().unwrap();
                 }
+                *self.current_gateway.lock().await = Some(gateway);
             }
             None => {
                 error!(
@@ -293,35 +277,13 @@ impl PortalServerInner {
         Ok(())
     }
 
-    async fn update_current_gateway(&self) -> eyre::Result<()> {
-        match self.current_gateway_candidate.lock().await.clone() {
-            Some(new_gateway) => {
-                self.current_gateway.lock().await.replace(new_gateway);
-            }
-            None => {
-                error!("CRITICAL: Couldn't find the current gateway");
-            }
-        }
-        // match self.current_gateway.lock().await.replace() {
-        //     Some(old_gateway) => {
-        //         info!(?old_gateway, "updated current gateway");
-        //     }
-        //     None => {
-        //         error!("CRITICAL: Couldn't find the current gateway");
-        //     }
-        // }
-        Ok(())
-    }
-
     pub async fn refresh_gateway_list(&self) -> eyre::Result<()> {
         self.fetch_registered_gateways().await?;
-        // self.update_current_gateway_candidate(0, None).await?;
         Ok(())
     }
 
     pub async fn on_fork(&self, expected_block_number: Option<u64>) -> eyre::Result<()> {
-        self.update_current_gateway_candidate(0, expected_block_number).await?;
-        self.update_current_gateway().await?;
+        self.update_current_gateway(0, expected_block_number).await?;
         self.current_block_number.store(0, Ordering::Relaxed);
         Ok(())
     }
@@ -342,11 +304,6 @@ impl PortalServerInner {
             Err(err) => trace!(%err, "Error: failed gateway"),
         }
         debug!(?gateway, "served fcu")
-    }
-
-    pub async fn set_current_proxy(&self, proxy: NodeGethPair) {
-        let mut guard = self.current_proxy.lock().await;
-        (*guard) = Some(proxy);
     }
 }
 
