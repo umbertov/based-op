@@ -352,6 +352,7 @@ start-main-node: create-network
 	@# generate proxies.json if missing
 	@if [ ! -f .local_main_node/config/proxies.json ]; then \
 		cp main_node/proxies_example.json .local_main_node/config/proxies.json; \
+		sed -i -e 's/<JWT_TOKEN>/$(shell cat .local_main_node/config/jwt)/g' .local_main_node/config/proxies.json; \
 	fi
 	@echo "...Done"
 	@echo
