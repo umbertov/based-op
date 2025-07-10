@@ -102,18 +102,14 @@ impl PortalServer {
     pub async fn run(&self, addr: SocketAddr) -> eyre::Result<ServerHandle> {
         let registry_client = self.inner.registry_client.clone();
 
-        let self_clone = self.clone();
         let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |s| {
             let current_proxy = tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
                 // Now we can block on the future inside block_in_place
-                let guard = rt.block_on(self_clone.inner.current_proxy.lock());
+                let guard = rt.block_on(self.inner.current_proxy.lock());
                 <std::option::Option<NodeGethPair> as Clone>::clone(&(*guard)).expect("No current proxy set")
             });
-            let op_geth_client = current_proxy.inner.op_geth_client.clone();
-            let op_geth_engine_client = current_proxy.inner.op_geth_engine_client.clone();
-            let op_node_client = current_proxy.inner.op_node_client.clone();
-
+            
             ProxyService::new(
                 PORTAL_CAPABILITIES,
                 s,
@@ -951,25 +947,3 @@ fn create_gateway_client(url: Url, jwt_str: String, address: Address, timeout: D
     Ok(gateway_client)
 }
 
-fn create_client(url: Url, timeout: Duration) -> eyre::Result<RpcClient> {
-    let client = HttpClientBuilder::default()
-        .max_request_size(u32::MAX)
-        .max_response_size(u32::MAX)
-        .request_timeout(timeout.into())
-        .build(url)?;
-    Ok(client)
-}
-
-fn create_auth_client(url: Url, jwt: JwtSecret, timeout: Duration) -> eyre::Result<AuthRpcClient> {
-    let secret_layer = AuthClientLayer::new(jwt);
-    let middleware = tower::ServiceBuilder::default().layer(secret_layer);
-
-    let client = HttpClientBuilder::default()
-        .max_request_size(u32::MAX)
-        .max_response_size(u32::MAX)
-        .set_http_middleware(middleware)
-        .request_timeout(timeout.into())
-        .build(url)?;
-
-    Ok(client)
-}

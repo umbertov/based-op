@@ -4,8 +4,6 @@ use bop_common::utils::init_tracing;
 use clap::Parser;
 use cli::PortalArgs;
 use proxy::{NodeGethPairArgs, NodeGethPairConfig};
-use reqwest::Url;
-use reth_rpc_layer::JwtSecret;
 use server::PortalServer;
 use tracing::info;
 
@@ -15,6 +13,7 @@ mod cli;
 mod middleware;
 mod proxy;
 mod server;
+mod utils;
 
 pub struct Portal {
     pub pairs: Vec<NodeGethPair>,
@@ -29,10 +28,38 @@ impl Portal {
         let node_geth_pair_config: NodeGethPairConfig =
             serde_json::from_reader(file).expect("Failed to parse NodeGethPairConfig config json file");
 
-        let pairs = 
-            .collect();
-        self.pairs.push(pair);
+        node.proxies
+            .into_iter()
+            .filter_map(|proxy| {
+                 let timeout = Duration::from_millis(value.timeout_ms);
+                let op_node_url = Url::parse(&proxy.op_node_url).expect("Invalid op_node_url");
+                let op_geth_url = Url::parse(&proxy.op_geth_url).expect("Invalid op_geth_url");
+                let op_geth_engine_url = Url::parse(&proxy.op_geth_engine_url).expect("Invalid op_geth_engine_url");
+                let op_geth_engine_jwt = JwtSecret::from_hex(&proxy.op_geth_engine_jwt).expect("Invalid JWT secret");
+                let ingress_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), proxy.portal_ingress_port);
+                let op_node_client = create_client(op_node_url, timeout).ok()?;
+                let op_geth_client = create_client(op_geth_url, timeout).ok()?;
+                
+                let op_geth_engine_client = create_auth_client(op_geth_engine_url, op_geth_engine_jwt, timeout).ok()?;
+                let inner = NodeGethPairInner {
+                        op_node_client,
+                        op_geth_client,
+                        op_geth_engine_client,
+                        active: Arc::new(AtomicBool::new(false)),
+                        ingress_addr,
+                    };
 
+
+                    Some(NodeGethPair(Arc::new(inner)))
+                }).collect()
+        let pairs = node_geth_pair_config.proxies.iter().map(|cp| {
+            
+        } )
+        for p in &node_geth_pair_config.proxies {
+            
+        }
+
+   
         Ok(Self {pairs: Vec::new(), active_pair: Arc::new(AtomicU64::new(0)), portal })
     }
 
