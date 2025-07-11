@@ -172,7 +172,7 @@ pub trait PortalApi {
 
     /// The gossip static address string used by the op-node
     #[method(name = "opNodeGossipStatic")]
-    async fn op_node_gossip_static(&self) -> RpcResult<String>;
+    async fn op_node_gossip_static(&self, public_ip: bool) -> RpcResult<String>;
 
     /// The enr that can be used to sync with the op-node
     #[method(name = "opNodeBootnodeEnr")]
@@ -180,7 +180,7 @@ pub trait PortalApi {
 
     /// The enode that can be used to sync with the op-geth
     #[method(name = "opGethBootnodeEnode")]
-    async fn op_geth_bootnode_enode(&self) -> RpcResult<String>;
+    async fn op_geth_bootnode_enode(&self, public_ip: bool) -> RpcResult<String>;
 }
 
 #[rpc(client, server, namespace = "control")]
@@ -379,8 +379,10 @@ pub struct OpGethInfo {
     pub ports: Ports,
     #[serde(rename = "listenAddr")]
     pub listen_addr: String,
-    pub protocols: Protocols,
+    pub protocols: Protocols
 }
+
+
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -398,7 +400,7 @@ pub struct Protocols {
 #[serde(rename_all = "camelCase")]
 pub struct Eth {
     pub network: u64,
-    pub difficulty: u64,
+    // pub difficulty: u64,
     pub genesis: String,
     pub config: EthConfig,
     pub head: String,

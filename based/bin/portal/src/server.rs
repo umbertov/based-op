@@ -1,6 +1,7 @@
 use std::{
     fmt,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -20,6 +21,7 @@ use bop_common::{
         RegistryApiServer,
     },
     communication::messages::{RpcError, RpcResult},
+    debug_panic,
     time::{Duration, Instant},
     utils::{uuid, wait_for_signal},
 };
@@ -31,7 +33,9 @@ use jsonrpsee::{
 use op_alloy_rpc_types::OpTransactionReceipt;
 use op_alloy_rpc_types_engine::{OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4, OpPayloadAttributes};
 use parking_lot::RwLock;
+use regex::Regex;
 use reqwest::Url;
+use reqwest::get;
 use reth_rpc_layer::{AuthClientLayer, AuthClientService, JwtSecret};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
@@ -259,11 +263,11 @@ impl PortalServer {
                     "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
                     block_number, expected_block_number
                 );
-                panic!(
-                    "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
-                    block_number, expected_block_number
-                );
-                // return Ok(());
+                // debug_panic!(
+                //     "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
+                //     block_number, expected_block_number
+                // );
+                return Ok(());
             }
         }
         let current_gateway_index = self.gateways().iter().position(|g| g.id == gateway_url);
@@ -775,10 +779,25 @@ impl PortalApiServer for PortalServer {
     }
 
     /// The gossip static address string used by the op-node
-    async fn op_node_gossip_static(&self) -> RpcResult<String> {
-        Ok(self.op_node_client.peer_info().await.and_then(|p| {
-            p.addresses.last().cloned().map(Ok).unwrap_or(Err(ClientError::Custom("empty peer addresses".to_string())))
-        })?)
+    async fn op_node_gossip_static(&self, use_public_ip: bool) -> RpcResult<String> {
+        let p = self.op_node_client.peer_info().await.map_err(|e| RpcError::Jsonrpsee(e))?;
+        let address = p.addresses.last().cloned();
+        match address {
+            Some(addr) => {
+                if use_public_ip {
+                    let public_ip =
+                        get_public_ip().await.map_err(|e| RpcError::Jsonrpsee(ClientError::Custom(e.to_string())))?;
+                    let re = Regex::new(r"(/ip4/)([0-9.]+)(/\w+/[0-9]+/p2p/\w+)").unwrap();
+                    let result = re.replace(addr.as_str(), format!("${{1}}{}${{3}}", public_ip));
+                    return Ok(result.to_string());
+                } else {
+                    return Ok(addr.to_string());
+                }
+            }
+            None => {
+                return Err(RpcError::Jsonrpsee(ClientError::Custom("empty peer addresses".to_string())));
+            }
+        }
     }
 
     /// The enr that can be used to sync with the op-node
@@ -787,8 +806,17 @@ impl PortalApiServer for PortalServer {
     }
 
     /// The enode that can be used to sync with the op-geth
-    async fn op_geth_bootnode_enode(&self) -> RpcResult<String> {
-        Ok(self.fallback_eth_client.node_info().await.map(|p| p.enode)?)
+    async fn op_geth_bootnode_enode(&self, use_public_ip: bool) -> RpcResult<String> {
+        let enode_str = self.fallback_eth_client.node_info().await.map(|p| p.enode)?;
+        if use_public_ip {
+            let public_ip =
+                get_public_ip().await.map_err(|e| RpcError::Jsonrpsee(ClientError::Custom(e.to_string())))?;
+            let re = Regex::new(r"(enode://\w+@)([0-9.]+)(:[0-9]+)").unwrap();
+            let result = re.replace(&enode_str, format!("${{1}}{}${{3}}", public_ip));
+            Ok(result.to_string())
+        } else {
+            Ok(enode_str)
+        }
     }
 }
 
@@ -868,4 +896,12 @@ fn create_gateway_client(url: Url, jwt_str: String, address: Address, timeout: D
     let client = create_auth_client(url.clone(), jwt, timeout)?;
     let gateway_client = Gateway::new(url, client, jwt_str, address);
     Ok(gateway_client)
+}
+
+async fn get_public_ip() -> eyre::Result<IpAddr> {
+    let pub_ip = get("https://ifconfig.me/ip").await?;
+    let body = pub_ip.text().await?;
+    println!("Public IP: {}", body);
+    let pub_ip = IpAddr::from_str(&body)?;
+    Ok(pub_ip)
 }
