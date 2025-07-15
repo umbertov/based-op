@@ -8,7 +8,7 @@ use jsonrpsee::{
 use serde_json::value::RawValue;
 use tracing::{debug, error};
 
-use crate::server::{AuthRpcClient, RpcClient};
+use crate::clients::{AuthRpcClient, RpcClient};
 
 #[derive(Clone)]
 pub struct EngineApiRouter<S> {
@@ -22,14 +22,10 @@ pub struct EngineApiRouter<S> {
 
 impl<S> EngineApiRouter<S> {
     pub fn new(
-        supported_methods: &'static [&'static str],
         inner: S,
-        fallback_eth_client: RpcClient,
         fallback_client: AuthRpcClient,
-        op_client: RpcClient,
-        registry_client: RpcClient,
     ) -> Self {
-        Self { supported_methods, inner, fallback_eth_client, fallback_client, op_client, registry_client }
+        Self { inner, fallback_client }
     }
 }
 
