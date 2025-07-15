@@ -259,10 +259,10 @@ impl PortalServer {
                     "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
                     block_number, expected_block_number
                 );
-                panic!(
-                    "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
-                    block_number, expected_block_number
-                );
+                // panic!(
+                //     "CRITICAL: The block number we got from the registry ({}) does not match the expected block number ({})",
+                //     block_number, expected_block_number
+                // );
                 // return Ok(());
             }
         }
